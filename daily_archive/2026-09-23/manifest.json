@@ -1,0 +1,27 @@
+{
+  "acceptance_gate": "FAIL_CLOSED",
+  "account_data": "EXCLUDED: account IDs, cash, NAV, position quantity, cost, and market value",
+  "after_close_steps_present": true,
+  "counts": {
+    "actionable_signals": 0,
+    "daily_plans": 1,
+    "issues": 4,
+    "minute_symbols": 11,
+    "model_runs": 4,
+    "policy_decisions": 5929,
+    "signals": 539,
+    "truth_snapshots": 2,
+    "workflow_runs": 267
+  },
+  "generated_at_utc": "2026-09-23T07:57:39.278384+00:00",
+  "missing_close_steps": [],
+  "publication_scope": "PUBLIC_ALLOWLISTED_SUMMARY",
+  "run_statuses": {
+    "MISSED": 3,
+    "REVIEW": 28,
+    "SUCCEEDED": 236
+  },
+  "secret_data": "EXCLUDED: database, credentials, webhook URLs, and model response text",
+  "source_revision": "b91698bb75702d1a477386872eb888887c30805d",
+  "trade_date": "2026-09-23"
+}

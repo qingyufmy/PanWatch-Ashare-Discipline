@@ -187,6 +187,8 @@ def export_day(day: str, output_root: Path) -> dict:
         "run_statuses": dict(Counter(r.status for r in runs)),
         "acceptance_gate": review["gate"]["status"],
     }
+    if not run_data:
+        return manifest
     target = output_root.resolve() / day
     target.mkdir(parents=True, exist_ok=True)
     for name, data in (

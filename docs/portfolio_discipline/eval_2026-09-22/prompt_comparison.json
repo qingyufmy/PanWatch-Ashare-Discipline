@@ -1,0 +1,406 @@
+{
+  "input_hash": "a3a8230eb84cb4f5654e46f8be214aa3257c7b3932e4a45266bf0a3928dd4a27",
+  "champion": {
+    "prompt_version": "portfolio_flash_v1.0.2",
+    "model_version": "deepseek-v4-pro",
+    "policy_version": "p3-v1"
+  },
+  "challenger": {
+    "prompt_version": "portfolio_flash_v1.0.2",
+    "model_version": "deepseek-v4-pro",
+    "policy_version": "p3-v1"
+  },
+  "challenger_mode": "SHADOW_ONLY",
+  "metrics": {
+    "champion": {
+      "cases": 10,
+      "passed": 10,
+      "axis_pass": {
+        "signal": 10,
+        "position": 10,
+        "discipline": 10,
+        "model": 10,
+        "data": 10,
+        "system": 10
+      }
+    },
+    "challenger": {
+      "cases": 10,
+      "passed": 10,
+      "axis_pass": {
+        "signal": 10,
+        "position": 10,
+        "discipline": 10,
+        "model": 10,
+        "data": 10,
+        "system": 10
+      }
+    }
+  },
+  "results": {
+    "champion": [
+      {
+        "case_id": "correct_reduce",
+        "variant": "champion",
+        "verdict": "PASS",
+        "reason": "",
+        "expected": {
+          "verdict": "PASS"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "wrong_reduce",
+        "variant": "champion",
+        "verdict": "BLOCK",
+        "reason": "T_PLUS_ONE",
+        "expected": {
+          "verdict": "BLOCK"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "atr_false_alarm",
+        "variant": "champion",
+        "verdict": "PASS",
+        "reason": "",
+        "expected": {
+          "verdict": "PASS"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "thesis_invalid",
+        "variant": "champion",
+        "verdict": "BLOCK",
+        "reason": "THESIS_NOT_VALID",
+        "expected": {
+          "verdict": "BLOCK"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "high_profit_giveback",
+        "variant": "champion",
+        "verdict": "PASS",
+        "reason": "",
+        "expected": {
+          "verdict": "PASS"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "wrong_bottom_fishing",
+        "variant": "champion",
+        "verdict": "BLOCK",
+        "reason": "MAX_POSITION",
+        "expected": {
+          "verdict": "BLOCK"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "t_plus_one",
+        "variant": "champion",
+        "verdict": "BLOCK",
+        "reason": "T_PLUS_ONE",
+        "expected": {
+          "verdict": "BLOCK"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "stale_data",
+        "variant": "champion",
+        "verdict": "REVIEW",
+        "reason": "TRUTH_OR_DATA_STALE",
+        "expected": {
+          "verdict": "REVIEW"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "schema_error",
+        "variant": "champion",
+        "verdict": "BLOCK",
+        "reason": "SCHEMA_INVALID",
+        "expected": {
+          "verdict": "BLOCK"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "fast_deep_conflict",
+        "variant": "champion",
+        "verdict": "REVIEW",
+        "reason": "FAST_DEEP_CONFLICT",
+        "expected": {
+          "verdict": "REVIEW"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      }
+    ],
+    "challenger": [
+      {
+        "case_id": "correct_reduce",
+        "variant": "challenger",
+        "verdict": "PASS",
+        "reason": "",
+        "expected": {
+          "verdict": "PASS"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "wrong_reduce",
+        "variant": "challenger",
+        "verdict": "BLOCK",
+        "reason": "T_PLUS_ONE",
+        "expected": {
+          "verdict": "BLOCK"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "atr_false_alarm",
+        "variant": "challenger",
+        "verdict": "PASS",
+        "reason": "",
+        "expected": {
+          "verdict": "PASS"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "thesis_invalid",
+        "variant": "challenger",
+        "verdict": "BLOCK",
+        "reason": "THESIS_NOT_VALID",
+        "expected": {
+          "verdict": "BLOCK"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "high_profit_giveback",
+        "variant": "challenger",
+        "verdict": "PASS",
+        "reason": "",
+        "expected": {
+          "verdict": "PASS"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "wrong_bottom_fishing",
+        "variant": "challenger",
+        "verdict": "BLOCK",
+        "reason": "MAX_POSITION",
+        "expected": {
+          "verdict": "BLOCK"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "t_plus_one",
+        "variant": "challenger",
+        "verdict": "BLOCK",
+        "reason": "T_PLUS_ONE",
+        "expected": {
+          "verdict": "BLOCK"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "stale_data",
+        "variant": "challenger",
+        "verdict": "REVIEW",
+        "reason": "TRUTH_OR_DATA_STALE",
+        "expected": {
+          "verdict": "REVIEW"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "schema_error",
+        "variant": "challenger",
+        "verdict": "BLOCK",
+        "reason": "SCHEMA_INVALID",
+        "expected": {
+          "verdict": "BLOCK"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      },
+      {
+        "case_id": "fast_deep_conflict",
+        "variant": "challenger",
+        "verdict": "REVIEW",
+        "reason": "FAST_DEEP_CONFLICT",
+        "expected": {
+          "verdict": "REVIEW"
+        },
+        "checks": {
+          "signal": true,
+          "position": true,
+          "discipline": true,
+          "model": true,
+          "data": true,
+          "system": true
+        },
+        "pass": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,338 @@
+[
+  {
+    "cutoff": "2026-09-22T15:00:00+08:00",
+    "frozen": {
+      "evidence": {
+        "asof": "2026-09-22T14:59:00+08:00",
+        "fresh": true
+      },
+      "truth": {
+        "asof": "2026-09-22T14:50:00+08:00",
+        "trusted": true,
+        "sellable_qty": 300
+      },
+      "plan": {
+        "asof": "2026-09-22T08:50:00+08:00",
+        "thesis": "VALID",
+        "max_weight": 0.08,
+        "current_stop": 20.0
+      }
+    },
+    "proposals": {
+      "champion": {
+        "action": "REDUCE",
+        "quantity": 100
+      },
+      "challenger": {
+        "action": "REDUCE",
+        "quantity": 100
+      }
+    },
+    "expected": {
+      "verdict": "PASS"
+    },
+    "case_id": "correct_reduce"
+  },
+  {
+    "cutoff": "2026-09-22T15:00:00+08:00",
+    "frozen": {
+      "evidence": {
+        "asof": "2026-09-22T14:59:00+08:00",
+        "fresh": true
+      },
+      "truth": {
+        "asof": "2026-09-22T14:50:00+08:00",
+        "trusted": true,
+        "sellable_qty": 300
+      },
+      "plan": {
+        "asof": "2026-09-22T08:50:00+08:00",
+        "thesis": "VALID",
+        "max_weight": 0.08,
+        "current_stop": 20.0
+      }
+    },
+    "proposals": {
+      "champion": {
+        "action": "REDUCE",
+        "quantity": 500
+      },
+      "challenger": {
+        "action": "REDUCE",
+        "quantity": 500
+      }
+    },
+    "expected": {
+      "verdict": "BLOCK"
+    },
+    "case_id": "wrong_reduce"
+  },
+  {
+    "cutoff": "2026-09-22T15:00:00+08:00",
+    "frozen": {
+      "evidence": {
+        "asof": "2026-09-22T14:59:00+08:00",
+        "fresh": true
+      },
+      "truth": {
+        "asof": "2026-09-22T14:50:00+08:00",
+        "trusted": true,
+        "sellable_qty": 300
+      },
+      "plan": {
+        "asof": "2026-09-22T08:50:00+08:00",
+        "thesis": "VALID",
+        "max_weight": 0.08,
+        "current_stop": 20.0
+      }
+    },
+    "proposals": {
+      "champion": {
+        "action": "HOLD"
+      },
+      "challenger": {
+        "action": "HOLD"
+      }
+    },
+    "expected": {
+      "verdict": "PASS"
+    },
+    "case_id": "atr_false_alarm"
+  },
+  {
+    "cutoff": "2026-09-22T15:00:00+08:00",
+    "frozen": {
+      "evidence": {
+        "asof": "2026-09-22T14:59:00+08:00",
+        "fresh": true
+      },
+      "truth": {
+        "asof": "2026-09-22T14:50:00+08:00",
+        "trusted": true,
+        "sellable_qty": 300
+      },
+      "plan": {
+        "asof": "2026-09-22T08:50:00+08:00",
+        "thesis": "INVALID",
+        "max_weight": 0.08,
+        "current_stop": 20.0
+      }
+    },
+    "proposals": {
+      "champion": {
+        "action": "ADD",
+        "target_weight": 0.05
+      },
+      "challenger": {
+        "action": "ADD",
+        "target_weight": 0.05
+      }
+    },
+    "expected": {
+      "verdict": "BLOCK"
+    },
+    "case_id": "thesis_invalid"
+  },
+  {
+    "cutoff": "2026-09-22T15:00:00+08:00",
+    "frozen": {
+      "evidence": {
+        "asof": "2026-09-22T14:59:00+08:00",
+        "fresh": true
+      },
+      "truth": {
+        "asof": "2026-09-22T14:50:00+08:00",
+        "trusted": true,
+        "sellable_qty": 300
+      },
+      "plan": {
+        "asof": "2026-09-22T08:50:00+08:00",
+        "thesis": "VALID",
+        "max_weight": 0.08,
+        "current_stop": 20.0
+      }
+    },
+    "proposals": {
+      "champion": {
+        "action": "REDUCE",
+        "quantity": 100,
+        "new_stop": 22.0
+      },
+      "challenger": {
+        "action": "REDUCE",
+        "quantity": 100,
+        "new_stop": 22.0
+      }
+    },
+    "expected": {
+      "verdict": "PASS"
+    },
+    "case_id": "high_profit_giveback"
+  },
+  {
+    "cutoff": "2026-09-22T15:00:00+08:00",
+    "frozen": {
+      "evidence": {
+        "asof": "2026-09-22T14:59:00+08:00",
+        "fresh": true
+      },
+      "truth": {
+        "asof": "2026-09-22T14:50:00+08:00",
+        "trusted": true,
+        "sellable_qty": 300
+      },
+      "plan": {
+        "asof": "2026-09-22T08:50:00+08:00",
+        "thesis": "VALID",
+        "max_weight": 0.08,
+        "current_stop": 20.0
+      }
+    },
+    "proposals": {
+      "champion": {
+        "action": "ADD",
+        "target_weight": 0.12
+      },
+      "challenger": {
+        "action": "ADD",
+        "target_weight": 0.12
+      }
+    },
+    "expected": {
+      "verdict": "BLOCK"
+    },
+    "case_id": "wrong_bottom_fishing"
+  },
+  {
+    "cutoff": "2026-09-22T15:00:00+08:00",
+    "frozen": {
+      "evidence": {
+        "asof": "2026-09-22T14:59:00+08:00",
+        "fresh": true
+      },
+      "truth": {
+        "asof": "2026-09-22T14:50:00+08:00",
+        "trusted": true,
+        "sellable_qty": 0
+      },
+      "plan": {
+        "asof": "2026-09-22T08:50:00+08:00",
+        "thesis": "VALID",
+        "max_weight": 0.08,
+        "current_stop": 20.0
+      }
+    },
+    "proposals": {
+      "champion": {
+        "action": "EXIT",
+        "quantity": 300
+      },
+      "challenger": {
+        "action": "EXIT",
+        "quantity": 300
+      }
+    },
+    "expected": {
+      "verdict": "BLOCK"
+    },
+    "case_id": "t_plus_one"
+  },
+  {
+    "cutoff": "2026-09-22T15:00:00+08:00",
+    "frozen": {
+      "evidence": {
+        "asof": "2026-09-22T14:59:00+08:00",
+        "fresh": false
+      },
+      "truth": {
+        "asof": "2026-09-22T14:50:00+08:00",
+        "trusted": true,
+        "sellable_qty": 300
+      },
+      "plan": {
+        "asof": "2026-09-22T08:50:00+08:00",
+        "thesis": "VALID",
+        "max_weight": 0.08,
+        "current_stop": 20.0
+      }
+    },
+    "proposals": {
+      "champion": {
+        "action": "HOLD"
+      },
+      "challenger": {
+        "action": "HOLD"
+      }
+    },
+    "expected": {
+      "verdict": "REVIEW"
+    },
+    "case_id": "stale_data"
+  },
+  {
+    "cutoff": "2026-09-22T15:00:00+08:00",
+    "frozen": {
+      "evidence": {
+        "asof": "2026-09-22T14:59:00+08:00",
+        "fresh": true
+      },
+      "truth": {
+        "asof": "2026-09-22T14:50:00+08:00",
+        "trusted": true,
+        "sellable_qty": 300
+      },
+      "plan": {
+        "asof": "2026-09-22T08:50:00+08:00",
+        "thesis": "VALID",
+        "max_weight": 0.08,
+        "current_stop": 20.0
+      }
+    },
+    "proposals": {
+      "champion": {
+        "action": "SELL_ALL"
+      },
+      "challenger": {
+        "action": "SELL_ALL"
+      }
+    },
+    "expected": {
+      "verdict": "BLOCK"
+    },
+    "case_id": "schema_error"
+  },
+  {
+    "cutoff": "2026-09-22T15:00:00+08:00",
+    "frozen": {
+      "evidence": {
+        "asof": "2026-09-22T14:59:00+08:00",
+        "fresh": true
+      },
+      "truth": {
+        "asof": "2026-09-22T14:50:00+08:00",
+        "trusted": true,
+        "sellable_qty": 300
+      },
+      "plan": {
+        "asof": "2026-09-22T08:50:00+08:00",
+        "thesis": "VALID",
+        "max_weight": 0.08,
+        "current_stop": 20.0
+      }
+    },
+    "proposals": {
+      "champion": {
+        "action": "HOLD",
+        "fast_deep_conflict": true
+      },
+      "challenger": {
+        "action": "HOLD",
+        "fast_deep_conflict": true
+      }
+    },
+    "expected": {
+      "verdict": "REVIEW"
+    },
+    "case_id": "fast_deep_conflict"
+  }
+]

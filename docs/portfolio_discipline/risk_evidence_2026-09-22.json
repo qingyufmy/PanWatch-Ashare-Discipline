@@ -1,0 +1,116 @@
+{
+  "declared_nav_cny": 500000,
+  "nav_source": "user_attested_2026-09-22",
+  "stocks": {
+    "002436": {
+      "trade_date": "2026-09-22",
+      "close": 44.23,
+      "sina_close": 44.23,
+      "sina_last_at": "2026-09-22T15:00:00+08:00",
+      "minute_rows": 238,
+      "atr14": 2.8636,
+      "low10": 37.38,
+      "daily_bars": 66
+    },
+    "002487": {
+      "trade_date": "2026-09-22",
+      "close": 38.08,
+      "sina_close": 38.08,
+      "sina_last_at": "2026-09-22T15:00:00+08:00",
+      "minute_rows": 238,
+      "atr14": 2.0329,
+      "low10": 31.952,
+      "daily_bars": 66
+    },
+    "300136": {
+      "trade_date": "2026-09-22",
+      "close": 59.18,
+      "sina_close": 59.18,
+      "sina_last_at": "2026-09-22T15:00:00+08:00",
+      "minute_rows": 238,
+      "atr14": 2.3143,
+      "low10": 54.23,
+      "daily_bars": 66
+    },
+    "301080": {
+      "trade_date": "2026-09-22",
+      "close": 118.8,
+      "sina_close": 118.8,
+      "sina_last_at": "2026-09-22T15:00:00+08:00",
+      "minute_rows": 238,
+      "atr14": 10.1757,
+      "low10": 76.01,
+      "daily_bars": 66
+    },
+    "600206": {
+      "trade_date": "2026-09-22",
+      "close": 49.95,
+      "sina_close": 49.95,
+      "sina_last_at": "2026-09-22T15:00:00+08:00",
+      "minute_rows": 238,
+      "atr14": 2.8943,
+      "low10": 43.4,
+      "daily_bars": 66
+    },
+    "600367": {
+      "trade_date": "2026-09-22",
+      "close": 38.29,
+      "sina_close": 38.29,
+      "sina_last_at": "2026-09-22T15:00:00+08:00",
+      "minute_rows": 238,
+      "atr14": 2.105,
+      "low10": 32.92,
+      "daily_bars": 66
+    },
+    "600584": {
+      "trade_date": "2026-09-22",
+      "close": 72.24,
+      "sina_close": 72.24,
+      "sina_last_at": "2026-09-22T15:00:00+08:00",
+      "minute_rows": 238,
+      "atr14": 2.865,
+      "low10": 65.5,
+      "daily_bars": 66
+    },
+    "601208": {
+      "trade_date": "2026-09-22",
+      "close": 52.19,
+      "sina_close": 52.19,
+      "sina_last_at": "2026-09-22T15:00:00+08:00",
+      "minute_rows": 238,
+      "atr14": 3.0971,
+      "low10": 44.86,
+      "daily_bars": 66
+    },
+    "688146": {
+      "trade_date": "2026-09-22",
+      "close": 214.61,
+      "sina_close": 214.61,
+      "sina_last_at": "2026-09-22T15:00:00+08:00",
+      "minute_rows": 238,
+      "atr14": 12.93,
+      "low10": 213.18,
+      "daily_bars": 66
+    },
+    "688222": {
+      "trade_date": "2026-09-22",
+      "close": 44.4,
+      "sina_close": 44.4,
+      "sina_last_at": "2026-09-22T15:00:00+08:00",
+      "minute_rows": 238,
+      "atr14": 2.4164,
+      "low10": 29.6,
+      "daily_bars": 66
+    },
+    "688783": {
+      "trade_date": "2026-09-22",
+      "close": 29.78,
+      "sina_close": 29.78,
+      "sina_last_at": "2026-09-22T15:00:00+08:00",
+      "minute_rows": 238,
+      "atr14": 1.5029,
+      "low10": 24.97,
+      "daily_bars": 65
+    }
+  }
+}

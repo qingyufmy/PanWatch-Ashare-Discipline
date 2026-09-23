@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchAPI } from '@panwatch/api/client'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Input } from '@panwatch/base-ui/components/ui/input'
@@ -40,6 +40,7 @@ type DailyPlan = {
   payload: { proposals: Array<{ symbol: string; action: string; qty_hint: number | null; rationale: string }> }
 }
 type WorkflowRun = { run_id: string; step: string; slot: string; status: string; payload: Record<string, unknown> }
+type Notification = { notification_id: string; title: string; symbol: string | null; delivery_status: string; reason: string; queued_at: string }
 type IssueSummary = { issue_count: number; occurrences: number; unresolved: number }
 
 const actions = ['OPEN', 'ADD', 'REDUCE', 'EXIT']
@@ -49,6 +50,7 @@ export default function SignalJournalPage() {
   const [signals, setSignals] = useState<Signal[]>([])
   const [dailyPlan, setDailyPlan] = useState<DailyPlan | null>(null)
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([])
+  const [notifications, setNotifications] = useState<Notification[]>([])
   const [issues, setIssues] = useState<IssueSummary | null>(null)
   const [selected, setSelected] = useState<SignalDetail | null>(null)
   const [loading, setLoading] = useState(false)
@@ -56,20 +58,24 @@ export default function SignalJournalPage() {
   const [quantity, setQuantity] = useState('')
   const [price, setPrice] = useState('')
   const [notes, setNotes] = useState('')
+  const [recording, setRecording] = useState(false)
+  const pendingExecution = useRef<{ fingerprint: string; requestId: string; executedAt: string } | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
       const tradeDate = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' })
-      const [nextSignals, plans, runs, issueSummary] = await Promise.all([
+      const [nextSignals, plans, runs, notices, issueSummary] = await Promise.all([
         fetchAPI<Signal[]>('/portfolio-discipline/signals?limit=100'),
         fetchAPI<DailyPlan[]>(`/portfolio-workflow/plans?trade_date=${tradeDate}&limit=5`),
         fetchAPI<WorkflowRun[]>(`/portfolio-workflow/runs?trade_date=${tradeDate}&limit=100`),
+        fetchAPI<Notification[]>(`/portfolio-workflow/notifications?trade_date=${tradeDate}&limit=100`),
         fetchAPI<IssueSummary>('/system-issues/summary/daily'),
       ])
       setSignals(nextSignals)
       setDailyPlan(plans[0] || null)
       setWorkflowRuns(runs)
+      setNotifications(notices)
       setIssues(issueSummary)
     } catch (error) {
       toast(error instanceof Error ? error.message : '读取信号失败', 'error')
@@ -106,28 +112,39 @@ export default function SignalJournalPage() {
   }
 
   const recordExecution = async () => {
-    if (!selected) return
+    if (!selected || recording) return
     const actualQty = Number(quantity)
     const actualPrice = price.trim() ? Number(price) : null
     if (!Number.isInteger(actualQty) || actualQty <= 0 || (actualPrice !== null && !(actualPrice > 0))) {
       toast('请输入有效的实际数量和价格', 'error')
       return
     }
+    const fingerprint = JSON.stringify([selected.signal_id, actualAction, actualQty, actualPrice, notes])
+    if (pendingExecution.current?.fingerprint !== fingerprint) {
+      pendingExecution.current = { fingerprint, requestId: crypto.randomUUID(), executedAt: new Date().toISOString() }
+    }
+    const request = pendingExecution.current
+    if (!request) return
+    setRecording(true)
     try {
       const result = await fetchAPI<Execution>(`/portfolio-discipline/signals/${selected.signal_id}/executions`, {
         method: 'POST',
         body: JSON.stringify({
           actual_action: actualAction, actual_qty: actualQty,
-          actual_price: actualPrice, executed_at: new Date().toISOString(), notes,
+          actual_price: actualPrice, executed_at: request.executedAt,
+          client_request_id: request.requestId, notes,
         }),
       })
-      toast(result.result === 'USER_REPORTED_OUT_OF_POLICY' ? '已记录计划外操作，待持仓对账' : '已记录实际操作，待持仓对账', 'success')
+      toast(result.result === 'USER_REPORTED_OUT_OF_POLICY' ? '已登记计划外用户报告，待持仓对账' : '已登记用户报告，待持仓对账', 'success')
+      pendingExecution.current = null
       setQuantity('')
       setPrice('')
       setNotes('')
       await openSignal(selected.signal_id)
     } catch (error) {
       toast(error instanceof Error ? error.message : '记录失败', 'error')
+    } finally {
+      setRecording(false)
     }
   }
 
@@ -152,7 +169,7 @@ export default function SignalJournalPage() {
               {dailyPlan.payload.proposals.map(item => (
                 <div key={item.symbol} className="rounded-lg border px-3 py-2 text-sm">
                   <div className="flex justify-between font-medium"><span>{item.symbol}</span><span>{item.action}</span></div>
-                  <p className="mt-1 text-xs text-muted-foreground">{item.qty_hint ? `${item.qty_hint} 股 · ` : ''}{item.rationale}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">模型方向待证据与 Policy 核对；模型提示数量不构成授权。</p>
                 </div>
               ))}
             </div>
@@ -161,6 +178,18 @@ export default function SignalJournalPage() {
         {workflowRuns.length > 0 && <div className="flex flex-wrap gap-2 text-xs">
           {workflowRuns.slice(0, 12).map(run => <span key={run.run_id} className="rounded-full border px-2 py-1">{run.step} · {run.status}</span>)}
         </div>}
+      </section>
+      <section className="card p-4 space-y-2">
+        <h2 className="text-base font-semibold">今日消息投递</h2>
+        <p className="text-xs text-muted-foreground">
+          入队 {notifications.length} · 平台接受 {notifications.filter(item => item.delivery_status === 'SENT_ACCEPTED').length} ·
+          投递未知 {notifications.filter(item => item.delivery_status === 'DELIVERY_UNKNOWN').length} ·
+          失败待处理 {notifications.filter(item => item.delivery_status === 'FAILED_RETRYABLE').length}。
+          平台接受不代表已读或成交。
+        </p>
+        {notifications.slice(0, 5).map(item => <p key={item.notification_id} className="border-t pt-2 text-xs">
+          {item.title} · {item.delivery_status} · {item.reason}
+        </p>)}
       </section>
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(330px,1fr)]">
         <section className="card overflow-hidden">
@@ -186,6 +215,10 @@ export default function SignalJournalPage() {
                 <h2 className="text-lg font-semibold">{selected.symbol} · {selected.action}</h2>
                 <p className="text-xs text-muted-foreground">状态 {selected.status} · 持仓计划 v{selected.plan_version ?? '—'} · 日计划 v{selected.daily_plan_version ?? '—'} · {selected.signal_id}</p>
                 {selected.actionable && <p className="mt-2 text-sm">政策批准数量：{selected.actionable.approved_qty ?? '未指定'} · {selected.actionable.policy_version}</p>}
+                {selected.actionable?.approved_qty != null && <p className="mt-1 text-xs text-muted-foreground">
+                  用户已报告 {selected.executions.filter(item => item.result === 'USER_REPORTED').reduce((sum, item) => sum + item.actual_qty, 0)} 股；
+                  按报告计算剩余 {Math.max(0, selected.actionable.approved_qty - selected.executions.filter(item => item.result === 'USER_REPORTED').reduce((sum, item) => sum + item.actual_qty, 0))} 股，仍需券商对账。
+                </p>}
               </div>
               <div>
                 <h3 className="mb-2 text-sm font-medium">政策裁决</h3>
@@ -212,7 +245,7 @@ export default function SignalJournalPage() {
                   <Input type="number" min="0" step="0.01" value={price} onChange={event => setPrice(event.target.value)} placeholder="实际价格（可选）" />
                 </div>
                 <Input value={notes} onChange={event => setNotes(event.target.value)} placeholder="备注（可选）" />
-                <div className="flex gap-2"><Button onClick={() => void recordExecution()}>记录实际操作</Button><Button variant="outline" onClick={() => void ignore()}>记录忽略</Button></div>
+                <div className="flex gap-2"><Button disabled={recording} onClick={() => void recordExecution()}>{recording ? '登记中…' : '登记人工操作'}</Button><Button variant="outline" onClick={() => void ignore()}>记录忽略</Button></div>
               </div>
             </div>
           )}

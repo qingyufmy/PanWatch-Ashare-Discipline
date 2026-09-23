@@ -15,8 +15,8 @@ $logs = Join-Path $sourceRoot 'data\public-upload-logs'
 if ($TradeDate -notmatch '^\d{4}-\d{2}-\d{2}$') { throw 'Invalid trade date' }
 $day = [datetime]::ParseExact($TradeDate, 'yyyy-MM-dd', [cultureinfo]::InvariantCulture)
 if ($day.Date -gt (Get-Date).Date) { throw 'Future trade date refused' }
-if ($day.Date -eq (Get-Date).Date -and (Get-Date).TimeOfDay -lt [timespan]::FromHours(16)) {
-    throw 'Current trading day is not past the 16:00 archive cutoff'
+if ($day.Date -eq (Get-Date).Date -and (Get-Date).TimeOfDay -lt [timespan]::Parse('15:40:00')) {
+    throw 'Current trading day is not past the 15:40 archive cutoff'
 }
 if (-not (Test-Path -LiteralPath $python) -or -not (Test-Path -LiteralPath $exporter)) {
     throw 'Local Python runtime or exporter is missing'

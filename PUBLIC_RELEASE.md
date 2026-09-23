@@ -12,6 +12,6 @@
 .\.venv\Scripts\python.exe scripts\export-public-daily.py --trade-date YYYY-MM-DD --output-root D:\盯盘\PanWatch-public\daily_archive
 ```
 
-本机任务计划 `PanWatch Public Daily Archive` 在交易日收盘后 16:10 调用 `scripts/publish-public-daily.ps1`，只提交 `daily_archive/YYYY-MM-DD/`。无当日工作流记录时不提交；盘后步骤缺失时仍保留已发生的记录，并在 manifest 标出缺口。任务依赖本机开机、管理员交互式会话和 GitHub 凭据可用。
+本机一次性任务计划 `PanWatch Public Archive 2026-09-23` 在 2026-09-23 15:50 调用 `scripts/publish-public-daily.ps1`，只提交 `daily_archive/2026-09-23/`。无当日工作流记录时不提交；盘后步骤缺失时仍保留已发生的记录，并在 manifest 标出缺口。此任务不会每日重复。执行依赖本机开机、管理员交互式会话和 GitHub 凭据可用。
 
 每日归档反映生成时已完成的自然日步骤。21:20 的 P10 定期复核晚于收盘归档，收盘文件中的门禁状态是生成时快照。

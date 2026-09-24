@@ -92,7 +92,8 @@ def _status(reason: str, **data) -> dict:
     return {"status": "REVIEW", "reason": reason, **data}
 
 
-def _decision_clock(model_run: ModelRun | None, *, observed_at: datetime | None = None) -> datetime:
+def _decision_clock(model_run: ModelRun | None, *, observed_at: datetime | None = None,
+                    evidence_available_at: datetime | None = None) -> datetime:
     """Use actual post-inference time, never the scheduled slot, for a decision."""
     if model_run is None or model_run.finished_at is None:
         raise ValueError("model_finish_missing")
@@ -100,6 +101,10 @@ def _decision_clock(model_run: ModelRun | None, *, observed_at: datetime | None 
     observed = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
     if finished > observed + timedelta(seconds=1):
         raise ValueError("model_finish_in_future")
+    if evidence_available_at is not None:
+        available = evidence_available_at.replace(tzinfo=timezone.utc)
+        if available > observed + timedelta(seconds=1):
+            raise ValueError("market_evidence_from_future")
     return observed
 
 
@@ -108,6 +113,23 @@ def _market_capture_time(market: dict, fallback: datetime) -> datetime:
     raw = market.get("completed_at")
     completed = datetime.fromisoformat(raw) if raw else fallback
     return completed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _intraday_quotes_current(market: dict, decision_at: datetime, *, ttl_seconds: int = 120) -> bool:
+    """A late model response cannot turn an old batch quote into a new action."""
+    for quote in market.get("holdings", []):
+        if quote.get("quality") != "FRESH" or not quote.get("source_asof"):
+            return False
+        try:
+            parsed = datetime.fromisoformat(quote["source_asof"])
+            if parsed.tzinfo is None:
+                return False
+            asof = parsed.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            return False
+        if not -30 <= (decision_at - asof).total_seconds() <= ttl_seconds:
+            return False
+    return bool(market.get("holdings"))
 
 
 def _paper_state(db: Session) -> dict | None:
@@ -354,6 +376,7 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None,
         db.add(macro)
         db.commit()
         macro_id = macro.id
+        macro_captured_at = macro.captured_at
     evidence = {"portfolio_truth_status": truth.truth_status,
                 "market_data_status": "PREMARKET_UNVERIFIED",
                 "truth_snapshot_id": truth_id,
@@ -374,7 +397,8 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None,
     with db_factory() as db:
         model_run = db.get(ModelRun, model.run_id)
         prompt_version = model_run.prompt_version if model_run else None
-        decision_at = _decision_clock(model_run, observed_at=decision_clock() if decision_clock else None)
+        decision_at = _decision_clock(model_run, observed_at=decision_clock() if decision_clock else None,
+                                      evidence_available_at=macro_captured_at)
         existing = db.query(DailyPortfolioPlan).filter_by(trade_date=day).order_by(DailyPortfolioPlan.version.desc()).first()
         version = (existing.version + 1) if existing else 1
         plan = DailyPortfolioPlan(trade_date=day, version=version, status="REVIEW_ONLY",
@@ -456,10 +480,7 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str,
         db.add(macro)
         db.commit()
         macro_id = macro.id
-    fresh = {q.get("symbol") for q in market["holdings"] if q.get("quality") == "FRESH"}
-    if market["risk_tone"] == "UNVERIFIED" or len(fresh) < len(positions):
-        return _status("INTRADAY_MARKET_EVIDENCE_UNVERIFIED", macro_evidence_snapshot_id=macro_id,
-                       fresh_holding_count=len(fresh), coverage=len(positions))
+        macro_captured_at = macro.captured_at
     # A risk observation is independent of the model's later action proposal.
     # Keep its notice decision in Shadow until natural-day review authorizes delivery.
     with db_factory() as db:
@@ -470,6 +491,11 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str,
         )
         shadow_ids = [row.id for row in shadow_observations]
         db.commit()
+    fresh = {q.get("symbol") for q in market["holdings"] if q.get("quality") == "FRESH"}
+    if market["risk_tone"] == "UNVERIFIED" or len(fresh) < len(positions):
+        return _status("INTRADAY_MARKET_EVIDENCE_UNVERIFIED", macro_evidence_snapshot_id=macro_id,
+                       fresh_holding_count=len(fresh), coverage=len(positions),
+                       risk_observation_ids=shadow_ids)
     payload = {"trade_date": day, "positions": positions,
                "evidence": {"phase": phase, "truth_snapshot_id": truth.id,
                             "macro_evidence_snapshot_id": macro_id,
@@ -492,7 +518,16 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str,
     with db_factory() as db:
         model_run = db.get(ModelRun, model.run_id)
         prompt_version = model_run.prompt_version if model_run else None
-        decision_at = _decision_clock(model_run, observed_at=decision_clock() if decision_clock else None)
+        decision_at = _decision_clock(model_run, observed_at=decision_clock() if decision_clock else None,
+                                      evidence_available_at=macro_captured_at)
+        if not _intraday_quotes_current(market, decision_at):
+            record_issue(db, category="LATE_SIGNAL", code="MODEL_OUTPUT_QUOTE_EXPIRED", source=phase,
+                         title="Intraday model output arrived after market evidence expired",
+                         context={"model_run_id": model.run_id,
+                                  "macro_evidence_snapshot_id": macro_id})
+            return _status("LATE_MODEL_OUTPUT_DISCARDED", model_run_id=model.run_id,
+                           macro_evidence_snapshot_id=macro_id,
+                           risk_observation_ids=shadow_ids)
         for action in proposal.proposals:
             quote = quote_by_symbol.get(action.symbol) or {}
             frozen = {"schema_valid": True, "model_conflict": False,

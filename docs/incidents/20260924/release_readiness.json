@@ -2,9 +2,11 @@
   "trade_date": "2026-09-24",
   "scope": "Sep24 incident repair candidate",
   "local_shadow_deployment": {
-    "started_at_beijing": "2026-09-24T16:59:07+08:00",
-    "schema_version": 141,
+    "started_at_beijing": "2026-09-24T19:39:01+08:00",
+    "source_commit": "1befb98c9db5acd3e4e0ecd947093b9cab5cd977",
+    "schema_version": 142,
     "health_http_status": 200,
+    "frontend_asset_http_status": 200,
     "unauthenticated_risk_observation_http_status": 401,
     "natural_market_session_observed": false
   },
@@ -13,7 +15,8 @@
     "offline_regression": "PASS",
     "natural_day_shadow": "UNPROVEN",
     "lark_delivery": "DISABLED_FOR_CANDIDATE",
-    "technical_level_lineage": "UNPROVEN",
+    "technical_level_lineage": "OFFLINE_CONFIRMED_S1_TEST_PASS_NATURAL_UNPROVEN",
+    "current_advice_single_state": "OFFLINE_TEST_PASS_NATURAL_UNPROVEN",
     "ready_for_user_facing_activation": false
   },
   "paper": {
@@ -31,5 +34,6 @@
   },
   "historical_reconciliation": null,
   "missing_frozen_forward_price_path": true,
+  "ex_post_price_path": "25_OF_34_EPISODES_WITH_SUBSEQUENT_BAR_NOT_DECISION_INPUT",
   "approved_for_main_merge": false
 }

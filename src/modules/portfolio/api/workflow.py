@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from src.modules.portfolio.daily_workflow import FIXED_STEPS
 from src.platform.persistence.database import get_db
 from src.platform.persistence.models import (
-    DailyPortfolioPlan, EvidenceSnapshot, PortfolioDecision, PortfolioNotification, PortfolioWorkflowRun,
+    DailyPortfolioPlan, EvidenceSnapshot, PortfolioDecision, PortfolioNotification,
+    PortfolioRiskObservation, PortfolioWorkflowRun,
     SignalEvent,
 )
 
@@ -105,16 +106,42 @@ def _utc_iso(value: datetime | None) -> str | None:
 
 @router.get("/advice")
 def current_advice(db: Session = Depends(get_db)):
-    """One current intraday advice per held CN symbol, with fresh hard risk taking precedence."""
+    """One current display state per symbol; unverified decisions are not advice."""
     now = datetime.now(timezone.utc)
     day = now.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
     rows = (db.query(PortfolioDecision).filter_by(trade_date=day, current=True)
             .order_by(PortfolioDecision.id.asc()).all())
     result = {row.symbol: {
-        "symbol": row.symbol, "action": row.action, "decision_id": row.id,
+        "symbol": row.symbol,
+        "action": row.action if row.decision_status == "APPROVED" and row.data_status == "FRESH" else "DATA_UNKNOWN",
+        "decision_id": row.id,
         "decision_status": row.decision_status, "created_at": _utc_iso(row.created_at),
         "expires_at": _utc_iso(row.expires_at), "source": "portfolio_decision",
+        "reason": (None if row.decision_status == "APPROVED" and row.data_status == "FRESH"
+                   else "当前决议或行情证据未通过核查，不能作为明确交易建议"),
     } for row in rows if row.expires_at > now.replace(tzinfo=None)}
+    observations = (db.query(PortfolioRiskObservation)
+                    .filter(PortfolioRiskObservation.trade_date == day,
+                            PortfolioRiskObservation.expires_at > now.replace(tzinfo=None))
+                    .order_by(PortfolioRiskObservation.observed_at.asc()).all())
+    for row in observations:
+        notice = db.get(PortfolioNotification, row.notification_id) if row.notification_id else None
+        evidence = db.get(EvidenceSnapshot, row.market_evidence_snapshot_id)
+        if (row.notice_outcome != "SUPPRESSED" or row.notice_reason != "SHADOW_ONLY"
+                or notice is None or notice.delivery_status != "SUPPRESSED"
+                or evidence is None or evidence.captured_at > row.observed_at):
+            continue
+        previous = result.get(row.symbol)
+        if previous and previous.get("source") == "shadow_risk" and previous.get("severity") == "HIGH":
+            continue
+        result[row.symbol] = {
+            "symbol": row.symbol, "action": "RISK_REVIEW", "decision_id": None,
+            "decision_status": "REVIEW_REQUIRED", "created_at": _utc_iso(row.observed_at),
+            "expires_at": _utc_iso(row.expires_at), "source": "shadow_risk",
+            "severity": row.severity,
+            "reason": ("已核实支撑破位，需人工复核；未批准交易" if row.observation_type == "CONFIRMED_SUPPORT_BREAK"
+                       else "市场转弱且存在待核查方向提案；未批准交易"),
+        }
     risk = (db.query(PortfolioWorkflowRun).filter_by(trade_date=day, step="HARD_RISK")
             .order_by(PortfolioWorkflowRun.started_at.desc()).first())
     if (risk and risk.status in {"SUCCEEDED", "REVIEW"} and risk.finished_at

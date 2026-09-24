@@ -27,6 +27,7 @@ def context_quality_matrix(context: dict) -> dict:
     """Keep coverage, sample scope and source-time quality separate."""
     indices = context.get("indices") or []
     holdings = context.get("holdings") or []
+    fresh_holdings = [q for q in holdings if q.get("quality") == "FRESH"]
     tech = context.get("global_tech") or []
     candidate = context.get("candidate_breadth") or {}
     trade_date = context.get("trade_date")
@@ -45,6 +46,16 @@ def context_quality_matrix(context: dict) -> dict:
         },
         "holdings": {"fresh": sum(q.get("quality") == "FRESH" for q in holdings),
                      "total": len(holdings), "scope": "current_holdings"},
+        "holding_breadth": {
+            "scope": "current_holdings_count_not_market_wide",
+            "advancers": sum((q.get("change_pct") or 0) > 0 for q in fresh_holdings),
+            "decliners": sum((q.get("change_pct") or 0) < 0 for q in fresh_holdings),
+            "unchanged": sum(q.get("change_pct") == 0 for q in fresh_holdings),
+            "change_unknown": sum(q.get("change_pct") is None for q in fresh_holdings),
+            "missing_or_stale": len(holdings) - len(fresh_holdings),
+        },
+        "industry_exposure": {"quality": "MISSING",
+                              "reason": "NO_VERIFIED_SECTOR_MAPPING"},
         "global_tech": {"source_time_verified": sum(bool(q.get("source_asof")) for q in tech),
                         "total": len(tech),
                         "fresh": sum(q.get("quality") == "FRESH" for q in tech),

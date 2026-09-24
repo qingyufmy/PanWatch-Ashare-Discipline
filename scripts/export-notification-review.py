@@ -18,6 +18,7 @@ from src.platform.persistence.models import (
     ActionableSignal, AppSettings, EvidenceSnapshot, ExecutionEvent, ModelRun, PortfolioDecision,
     PortfolioFeatureSnapshot, PortfolioLevelSnapshot, PortfolioNotification,
     PortfolioWorkflowRun, SignalEvent, SignalPolicyDecision, SystemIssue,
+    PortfolioRiskObservation,
 )
 
 
@@ -30,6 +31,8 @@ def export_review(day: str, root: Path | None = None) -> dict:
     with SessionLocal() as db:
         notifications = db.query(PortfolioNotification).filter_by(trade_date=day).order_by(
             PortfolioNotification.queued_at, PortfolioNotification.id).all()
+        observations = db.query(PortfolioRiskObservation).filter_by(trade_date=day).order_by(
+            PortfolioRiskObservation.observed_at, PortfolioRiskObservation.id).all()
         decisions = db.query(PortfolioDecision).filter_by(trade_date=day).order_by(
             PortfolioDecision.symbol, PortfolioDecision.revision).all()
         levels = db.query(PortfolioLevelSnapshot).filter_by(trade_date=day).order_by(
@@ -56,6 +59,7 @@ def export_review(day: str, root: Path | None = None) -> dict:
             "metrics": {
                 "model_proposals": len(signals), "decision_revisions": len(decisions),
                 "queued_notifications": len(notifications),
+                "risk_observations": len(observations),
                 "delivery_statuses": dict(Counter(n.delivery_status for n in notifications)),
                 "user_reported_executions": len(executions),
                 "quantity_matched_unverified": sum(e.reconcile_status == "QUANTITY_MATCHED_UNVERIFIED" for e in executions),
@@ -107,6 +111,18 @@ def export_review(day: str, root: Path | None = None) -> dict:
                 "delivery_status": n.delivery_status, "ack_status": n.ack_status,
                 "retry_count": n.retry_count, "supersedes_id": n.supersedes_id,
             } for n in notifications],
+            "risk_observations": [{
+                "id": r.id, "episode_key": r.episode_key,
+                "symbol": r.symbol, "observation_type": r.observation_type,
+                "severity": r.severity, "source_signal_ids": r.source_signal_ids,
+                "market_evidence_snapshot_id": r.market_evidence_snapshot_id,
+                "level_snapshot_id": r.level_snapshot_id,
+                "data_quality": r.data_quality,
+                "execution_readiness": r.execution_readiness,
+                "notice_outcome": r.notice_outcome, "notice_reason": r.notice_reason,
+                "notification_id": r.notification_id,
+                "observed_at": str(r.observed_at), "expires_at": str(r.expires_at),
+            } for r in observations],
             "decisions": [{
                 "id": d.id, "symbol": d.symbol, "revision": d.revision,
                 "signal_id": d.signal_id, "action": d.action, "approved_qty": d.approved_qty,

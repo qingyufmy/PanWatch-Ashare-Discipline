@@ -145,6 +145,11 @@ def test_batch_plan_creates_eleven_review_signals_with_daily_plan_link(monkeypat
             db.commit()
         return plan, result
 
+    async def fake_market(*_args, **_kwargs):
+        return {"trade_date": "2026-09-23", "risk_tone": "UNVERIFIED",
+                "completed_at": "2026-09-23T08:50:00+08:00", "holdings": []}
+
+    monkeypatch.setattr("src.modules.portfolio.daily_workflow.collect_market_context", fake_market)
     monkeypatch.setattr("src.modules.portfolio.daily_workflow.run_portfolio_prompt", fake_prompt)
     result = asyncio.run(_premarket_plan("2026-09-23", factory,
                                          datetime(2026, 9, 23, 8, 50, tzinfo=SH),

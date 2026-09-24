@@ -27,6 +27,7 @@ from src.platform.persistence.models import (
     ActionableSignal, AgentRun, DailyPortfolioPlan, EvidenceSnapshot, ExecutionEvent, ModelRun, PortfolioTruthSnapshot,
     PortfolioWorkflowRun, SignalEvent, SignalPolicyDecision, SystemIssue,
     PortfolioNotification, PortfolioDecision, PaperPortfolioFill, PaperPortfolioNav,
+    PortfolioFeatureSnapshot, PortfolioLevelSnapshot,
 )
 
 SH = ZoneInfo("Asia/Shanghai")
@@ -53,6 +54,36 @@ def _source_revision() -> str | None:
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
+
+
+def _price_evidence_linked(db, notice, decisions: dict, signals: dict) -> bool:
+    """Only a same-signal, same-feature, timely confirmed level earns this flag."""
+    decision = decisions.get(notice.decision_id)
+    if (decision is None or decision.level_snapshot_id is None
+            or decision.decision_status != "APPROVED"
+            or notice.decision_revision != decision.revision
+            or decision.signal_id not in (notice.signal_ids or [])):
+        return False
+    signal = signals.get(decision.signal_id)
+    level = db.get(PortfolioLevelSnapshot, decision.level_snapshot_id)
+    if signal is None or level is None or level.quality_status != "CONFIRMED":
+        return False
+    feature = db.get(PortfolioFeatureSnapshot, level.feature_snapshot_id)
+    evidence = db.get(EvidenceSnapshot, signal.evidence_snapshot_id)
+    if feature is None or feature.quality_status != "OK" or evidence is None:
+        return False
+    meta = (evidence.payload or {}).get("meta") or {}
+    if (not isinstance(meta, dict)
+            or meta.get("feature_snapshot_id") != feature.id
+            or meta.get("level_snapshot_id") != level.id
+            or level.trade_date != signal.trade_date
+            or feature.trade_date != signal.trade_date
+            or feature.symbol != level.symbol
+            or level.symbol[-6:] != decision.symbol
+            or (feature.payload or {}).get("missing_minutes")):
+        return False
+    return bool(level.market_asof <= decision.created_at
+                and timedelta(0) <= decision.created_at - level.market_asof <= timedelta(seconds=120))
 
 
 def _market_coverage(day: str) -> list[dict]:
@@ -113,6 +144,7 @@ def export_day(day: str, output_root: Path) -> dict:
             PortfolioNotification.queued_at).all()
         decision_ids = {n.decision_id for n in notifications if n.decision_id}
         decisions = {d.id: d for d in db.query(PortfolioDecision).filter(PortfolioDecision.id.in_(decision_ids)).all()}
+        signals_by_id = {s.signal_id: s for s in signals}
         review = review_snapshot(db, since=since, cadence="PUBLIC_AFTER_CLOSE")
         paper_nav = db.get(PaperPortfolioNav, day)
         prior_paper_nav = (db.query(PaperPortfolioNav)
@@ -262,7 +294,7 @@ def export_day(day: str, output_root: Path) -> dict:
             "anonymous_position_key": hashlib.sha256(f"{day}:{n.symbol}".encode()).hexdigest()[:16] if n.symbol else None,
             "action_type": decisions[n.decision_id].action if n.decision_id in decisions else "RISK_OR_PLAN",
             "decision_revision": n.decision_revision,
-            "price_evidence_linked": bool(decisions[n.decision_id].level_snapshot_id) if n.decision_id in decisions else False,
+            "price_evidence_linked": _price_evidence_linked(db, n, decisions, signals_by_id),
             "priority": n.priority, "reason_code": n.reason,
             "template_version": n.template_version, "content_hash": n.rendered_content_hash,
             "delivery_status": n.delivery_status, "suppression_reason_code": n.suppression_reason,

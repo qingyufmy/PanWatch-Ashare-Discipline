@@ -87,9 +87,10 @@ def list_risk_observations(trade_date: str | None = None, limit: int = 50,
     rows = query.order_by(PortfolioRiskObservation.observed_at.desc()).limit(min(max(limit, 1), 200)).all()
     return [{
         "id": row.id, "trade_date": row.trade_date, "symbol": row.symbol,
-        "observation_type": row.observation_type,
+        "observation_type": row.observation_type, "severity": row.severity,
         "source_signal_ids": row.source_signal_ids,
         "market_evidence_snapshot_id": row.market_evidence_snapshot_id,
+        "level_snapshot_id": row.level_snapshot_id,
         "data_quality": row.data_quality,
         "execution_readiness": row.execution_readiness,
         "notice_outcome": row.notice_outcome,

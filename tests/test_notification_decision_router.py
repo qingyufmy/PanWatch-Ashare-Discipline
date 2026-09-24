@@ -1,6 +1,9 @@
 """One-authority decision and deterministic message fixtures; no external sending."""
 
+import importlib.util
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -15,6 +18,7 @@ from src.platform.persistence.database import Base
 from src.platform.persistence.models import (
     ActionableSignal, PortfolioDecision, PortfolioFeatureSnapshot, PortfolioLevelSnapshot,
     PortfolioNotification, PortfolioTruthPosition, PortfolioTruthSnapshot,
+    SignalEvent,
 )
 
 
@@ -79,6 +83,17 @@ def test_action_reversal_appends_revision_and_per_position_outbox():
         outbox = db.query(PortfolioNotification).order_by(PortfolioNotification.decision_revision).all()
         assert [n.delivery_status for n in outbox] == ["CANCELLED", "CANCELLED", "PENDING"]
         assert all(n.symbol == "600001" for n in outbox)
+        script = Path(__file__).resolve().parents[1] / "scripts" / "export-public-daily.py"
+        spec = importlib.util.spec_from_file_location("portfolio_public_export_linkage", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        by_signal = {s.signal_id: s for s in db.query(SignalEvent).all()}
+        by_decision = {d.id: d for d in decisions}
+        assert module._price_evidence_linked(db, outbox[-1], by_decision, by_signal)
+        wrong_ref = SimpleNamespace(decision_id=outbox[-1].decision_id,
+                                    decision_revision=outbox[-1].decision_revision,
+                                    signal_ids=["unrelated-signal"])
+        assert not module._price_evidence_linked(db, wrong_ref, by_decision, by_signal)
         current_signal_id = decisions[-1].signal_id
         execution = record_manual_execution(
             db, signal_id=current_signal_id, actual_action="ADD", actual_qty=40,

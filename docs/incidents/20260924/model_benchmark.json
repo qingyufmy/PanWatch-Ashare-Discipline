@@ -1,6 +1,6 @@
 {
   "trade_date": "2026-09-24",
-  "basis": "frozen local model_runs, Beijing trading-day window; historical observation only, no new paid calls",
+  "basis": "frozen local model_runs on Sep24 plus two isolated authorized-provider Flash capability probes; probes did not mutate model configuration or trade state",
   "run_count": 7,
   "requested_role": "FAST",
   "profile_role": "FAST",
@@ -14,5 +14,14 @@
   "deep_run_count": 0,
   "fast_and_deep_distinct_profile_verified": false,
   "candidate_20_second_slo": "FAIL",
-  "new_provider_capability_test": "NOT_RUN"
+  "new_provider_capability_test": {
+    "model_requested": "deepseek-v4-flash",
+    "model_reported": "deepseek-v4-flash-ga-260731",
+    "minimal_json_probe": {"schema_valid": true, "latency_ms": 1562},
+    "synthetic_10_position_probe": {"schema_valid": true, "proposal_count": 10, "latency_ms": 25782},
+    "token_usage": null,
+    "isolated_probe_count": 2,
+    "production_profile_changed": false,
+    "candidate_20_second_slo": "FAIL_ON_SYNTHETIC_10_POSITION_PROBE"
+  }
 }

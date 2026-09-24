@@ -165,8 +165,17 @@ def export_day(day: str, output_root: Path) -> dict:
                     "symbol": q.get("symbol"), "change_pct": q.get("change_pct"),
                     "quality": q.get("quality"), "source_asof": q.get("source_asof"),
                 } for q in market_context.get("indices", []) if isinstance(q, dict)],
+                "global_tech_observations": [{
+                    "symbol": q.get("symbol"), "change_pct": q.get("change_pct"),
+                    "quality": q.get("quality"), "source_asof": q.get("source_asof"),
+                } for q in market_context.get("global_tech", []) if isinstance(q, dict)],
+                "board_observations": [{
+                    "symbol": q.get("symbol"), "change_pct": q.get("change_pct"),
+                    "quality": q.get("quality"), "source_asof": q.get("source_asof"),
+                } for q in market_context.get("boards", []) if isinstance(q, dict)],
                 "candidate_breadth": {k: breadth.get(k) for k in
-                                      ("snapshot_date", "breadth_up_pct", "sample_size", "scope")},
+                                      ("snapshot_date", "breadth_up_pct", "sample_size", "scope",
+                                       "regime", "confidence")},
                 "fresh_holding_quote_count": sum(q.get("quality") == "FRESH" for q in
                                                  market_context.get("holdings", []) if isinstance(q, dict)),
                 "action_counts": dict(Counter(s.action for s in linked)) or payload.get("action_counts") or {},

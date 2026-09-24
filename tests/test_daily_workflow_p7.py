@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from src.modules.portfolio.daily_workflow import (
-    _all_due_slots, _premarket_plan, recover_missed, run_step,
+    _all_due_slots, _premarket_plan, _simple_step, recover_missed, run_step,
 )
 from src.modules.portfolio.model_router import ModelResult
 from src.modules.portfolio.prompt_registry import PortfolioActionPlan
@@ -33,6 +33,8 @@ def test_simulated_day_all_slots_are_unique_and_replay_is_idempotent():
     day = date(2026, 9, 23)
     slots = _all_due_slots(day)
     assert len(slots) > 250
+    assert ("HARD_RISK", datetime(2026, 9, 23, 14, 55, tzinfo=SH)) in slots
+    assert ("HARD_RISK", datetime(2026, 9, 23, 15, 0, tzinfo=SH)) in slots
     assert len({(step, at.strftime("%H:%M") if step in {"HARD_RISK", "FEATURE_REFRESH"} else "DAILY")
                 for step, at in slots}) == len(slots)
     invoked = []
@@ -54,6 +56,39 @@ def test_simulated_day_all_slots_are_unique_and_replay_is_idempotent():
     with factory() as db:
         assert db.query(PortfolioWorkflowRun).count() == len(slots)
     engine.dispose()
+
+
+def test_risk_group_a_then_a_b_then_a_does_not_realert_a(monkeypatch):
+    from src.modules.portfolio import daily_workflow
+
+    sequence = [["A"], ["A", "B"], ["A"]]
+    sent = set()
+    attempts = []
+
+    def risk(*_args, **_kwargs):
+        members = sequence.pop(0)
+        return {"status": "SUCCEEDED", "positions": [{
+            "symbol": symbol, "color": "RED", "reason": "HARD_STOP", "price": 10.0,
+            "current_stop": 10.1, "market_data_asof": "2026-09-23T10:00:00+08:00",
+            "market_data_source": "fixture", "plan_version": 1,
+        } for symbol in members]}
+
+    async def notify(**kwargs):
+        attempts.append(kwargs["key"])
+        if kwargs["key"] in sent:
+            return {"status": "SKIPPED"}
+        sent.add(kwargs["key"])
+        return {"status": "SENT"}
+
+    monkeypatch.setattr(daily_workflow, "_risk_scan", risk)
+    monkeypatch.setattr(daily_workflow, "send_portfolio_notice", notify)
+    async def replay():
+        return [await _simple_step("HARD_RISK", "2026-09-23", lambda: None,
+                                   datetime(2026, 9, 23, 10, minute, tzinfo=SH)) for minute in (0, 1, 2)]
+    results = asyncio.run(replay())
+    assert len(attempts) == 4
+    assert len(sent) == 2
+    assert [r["notification"]["status"] for r in results] == ["SENT", "SENT", "SKIPPED"]
 
 
 def test_restart_records_missed_slots_without_backfilling_model_calls():

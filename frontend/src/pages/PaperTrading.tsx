@@ -5,6 +5,7 @@ import {
   type PaperTradingAccountResponse,
   type PaperTradingPositionItem,
   type PaperTradingTradeItem,
+  type PaperPortfolioFillItem,
   type EquityCurvePoint,
   type StrategyPerformanceItem,
   type NotifyChannelItem,
@@ -108,6 +109,7 @@ export default function PaperTradingPage() {
   const [account, setAccount] = useState<PaperTradingAccountResponse | null>(null)
   const [positions, setPositions] = useState<PaperTradingPositionItem[]>([])
   const [trades, setTrades] = useState<PaperTradingTradeItem[]>([])
+  const [portfolioFills, setPortfolioFills] = useState<PaperPortfolioFillItem[]>([])
   const [tradesTotal, setTradesTotal] = useState(0)
   const [equityCurve, setEquityCurve] = useState<EquityCurvePoint[]>([])
   const [strategyPerf, setStrategyPerf] = useState<StrategyPerformanceItem[]>([])
@@ -141,11 +143,12 @@ export default function PaperTradingPage() {
     setLoading(true)
     try {
       const mkt = marketView === 'ALL' ? undefined : marketView
-      const [acc, pos, tradeData, metrics] = await Promise.all([
+      const [acc, pos, tradeData, metrics, fills] = await Promise.all([
         paperTradingApi.getAccount(mkt),
         paperTradingApi.listPositions('open', mkt),
         paperTradingApi.listTrades(tradesPageSize, tradesPage * tradesPageSize, mkt),
         paperTradingApi.getMetrics(mkt),
+        paperTradingApi.listPortfolioFills(),
       ])
       setAccount(acc)
       setPositions(pos)
@@ -153,6 +156,7 @@ export default function PaperTradingPage() {
       setTradesTotal(tradeData.total)
       setEquityCurve(metrics.equity_curve)
       setStrategyPerf(metrics.strategy_performance || [])
+      setPortfolioFills(fills)
     } catch {
       toast('加载失败', 'error')
     } finally {
@@ -328,6 +332,7 @@ export default function PaperTradingPage() {
             <Activity className="w-4 h-4 text-white" />
           </div>
           <h1 className="text-lg font-bold">模拟盘</h1>
+          {account?.paper_mode === 'PAPER_ONLY' && <span className="text-xs rounded-full bg-primary/10 px-2 py-0.5 text-primary">持仓镜像 · PAPER_ONLY</span>}
           {account && (
             <span className={`text-xs px-2 py-0.5 rounded-full ${account.enabled ? 'bg-success/10 text-success' : 'bg-muted text-muted-foreground'}`}>
               {account.enabled ? '运行中' : '已暂停'}
@@ -359,12 +364,20 @@ export default function PaperTradingPage() {
             <Power className="w-3.5 h-3.5" />
             <span className="hidden sm:inline ml-1">{account?.enabled ? '暂停' : '启动'}</span>
           </Button>
-          <Button variant="outline" size="sm" className="h-8 text-destructive hover:text-destructive" onClick={handleReset}>
+          {account?.paper_mode !== 'PAPER_ONLY' && <Button variant="outline" size="sm" className="h-8 text-destructive hover:text-destructive" onClick={handleReset}>
             <RotateCcw className="w-3.5 h-3.5" />
             <span className="hidden sm:inline ml-1">重置</span>
-          </Button>
+          </Button>}
         </div>
       </div>
+
+      {account?.paper_mode === 'PAPER_ONLY' && account.baseline && (
+        <div className="card p-3 text-xs text-muted-foreground">
+          模拟收益起点：{account.baseline.trade_date}；持仓来自用户填报，价格来自 {account.baseline.quote_source}。
+          可用资金 {formatCurrency(account.baseline.synthetic_cash)} 元为按声明总资产减持仓市值计算的模拟假设，并非券商现金。
+          仅明确且通过模拟门禁的信号会记录 PAPER_ONLY 成交；末价撮合含交易成本模型，不代表真实委托成交。
+        </div>
+      )}
 
       {/* Market View Filter + 资金配置 */}
       {account && (
@@ -393,10 +406,10 @@ export default function PaperTradingPage() {
               )
             })}
           </div>
-          <Button variant="outline" size="sm" className="h-8" onClick={handleOpenConfig}>
+          {account.paper_mode !== 'PAPER_ONLY' && <Button variant="outline" size="sm" className="h-8" onClick={handleOpenConfig}>
             <SlidersHorizontal className="w-3.5 h-3.5" />
             <span className="hidden sm:inline ml-1">资金配置</span>
-          </Button>
+          </Button>}
         </div>
       )}
 
@@ -504,7 +517,8 @@ export default function PaperTradingPage() {
               <thead>
                 <tr className="border-b border-border text-muted-foreground text-xs">
                   <th className="text-left py-2 pr-3">股票</th>
-                  <th className="text-right py-2 px-2">入场价</th>
+                  <th className="text-right py-2 px-2">股数</th>
+                  <th className="text-right py-2 px-2">{account?.paper_mode === 'PAPER_ONLY' ? '模拟基准价' : '入场价'}</th>
                   <th className="text-right py-2 px-2">现价</th>
                   <th className="text-right py-2 px-2">浮动盈亏</th>
                   <th className="text-right py-2 px-2">止损</th>
@@ -521,7 +535,8 @@ export default function PaperTradingPage() {
                       <div className="font-medium">{p.stock_name || p.stock_symbol}</div>
                       <div className="text-xs text-muted-foreground">{p.stock_symbol} · {p.stock_market}</div>
                     </td>
-                    <td className="text-right py-2 px-2">{p.entry_price.toFixed(2)}</td>
+                    <td className="text-right py-2 px-2">{p.quantity}</td>
+                    <td className="text-right py-2 px-2">{p.entry_price.toFixed(2)}{p.source_cost_price != null && <div className="text-xs text-muted-foreground">填报成本 {p.source_cost_price.toFixed(3)}</div>}</td>
                     <td className="text-right py-2 px-2">{p.current_price?.toFixed(2) ?? '-'}</td>
                     <td className="text-right py-2 px-2">
                       <PnlText value={p.unrealized_pnl} />
@@ -532,7 +547,7 @@ export default function PaperTradingPage() {
                     <td className="py-2 px-2 text-xs text-muted-foreground">{p.strategy_code || '-'}</td>
                     <td className="text-right py-2 px-2">{p.holding_days}天</td>
                     <td className="text-right py-2 pl-2">
-                      <Button
+                      {account?.paper_mode !== 'PAPER_ONLY' && <Button
                         variant="ghost"
                         size="sm"
                         className="h-7 px-2 text-destructive hover:text-destructive"
@@ -540,7 +555,7 @@ export default function PaperTradingPage() {
                       >
                         <X className="w-3.5 h-3.5 mr-0.5" />
                         平仓
-                      </Button>
+                      </Button>}
                     </td>
                   </tr>
                 ))}
@@ -549,6 +564,21 @@ export default function PaperTradingPage() {
           </div>
         )}
       </div>
+
+      {account?.paper_mode === 'PAPER_ONLY' && (
+        <div className="card p-4">
+          <h2 className="text-sm font-semibold mb-2">模拟成交记录 ({portfolioFills.length})</h2>
+          {portfolioFills.length === 0 ? <p className="text-xs text-muted-foreground">尚无通过模拟门禁的成交信号。</p> : (
+            <div className="space-y-1 text-xs">
+              {portfolioFills.map(fill => <div key={fill.signal_id} className="flex flex-wrap gap-x-3 border-b border-border/50 py-1">
+                <span>{fill.filled_at}</span><span>{fill.symbol}</span><span>{fill.action}</span>
+                <span>{fill.quantity} 股 × {fill.price.toFixed(2)} 元</span>
+                <span>成本 {fill.fees.toFixed(2)} 元</span><span className="text-muted-foreground">PAPER_ONLY</span>
+              </div>)}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Trade History Dialog */}
       <Dialog open={tradesOpen} onOpenChange={setTradesOpen}>

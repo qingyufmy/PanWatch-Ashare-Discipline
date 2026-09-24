@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -60,6 +61,13 @@ class PaperTradingScheduler:
         if not any_market_trading_day():
             logger.debug("[模拟盘] 非交易日,跳过盘前计划通知")
             return
+        # The legacy notifier reports StrategySignalRun candidates, which do not
+        # belong to the portfolio mirror account.
+        from src.platform.persistence.database import SessionLocal
+        from src.modules.paper_trading.portfolio_paper import paper_mode
+        with SessionLocal() as db:
+            if paper_mode(db):
+                return
         try:
             from src.modules.paper_trading.paper_trading_notifier import send_premarket_plan
             await send_premarket_plan()
@@ -76,6 +84,23 @@ class PaperTradingScheduler:
             await send_daily_summary()
         except Exception as e:
             logger.exception(f"[模拟盘] 日终摘要通知异常: {e}")
+
+    async def _portfolio_nav_job(self):
+        from src.modules.paper_trading.portfolio_paper import capture_paper_nav, paper_mode
+        from src.platform.persistence.database import SessionLocal
+        from src.platform.persistence.models import PaperTradingAccount
+
+        def capture():
+            with SessionLocal() as db:
+                if not paper_mode(db):
+                    return {"status": "disabled"}
+                account = db.query(PaperTradingAccount).first()
+                return capture_paper_nav(db, account) if account else {"status": "account_missing"}
+
+        result = await asyncio.to_thread(capture)
+        if result.get("status") not in {"captured", "already_captured",
+                                        "calendar_unverified_or_closed", "disabled"}:
+            logger.warning("[模拟盘] 收盘净值未冻结: %s", result)
 
     def start(self):
         self.scheduler.add_job(
@@ -99,16 +124,21 @@ class PaperTradingScheduler:
             coalesce=True,
             max_instances=1,
         )
-        # 日终摘要 - 每天 15:30
+        # 日终摘要 follows the source-dated portfolio NAV freeze.
         self.scheduler.add_job(
             self._summary_job,
             "cron",
             hour=15,
-            minute=30,
+            minute=50,
             id="paper_trading_summary",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
+        )
+        self.scheduler.add_job(
+            self._portfolio_nav_job, "cron", hour=15, minute=45,
+            id="paper_trading_portfolio_nav", replace_existing=True,
+            coalesce=True, max_instances=1,
         )
         self.scheduler.start()
         from src.platform.scheduling.scheduler_registry import register

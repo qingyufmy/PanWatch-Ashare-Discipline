@@ -38,7 +38,7 @@ def seed_default_profiles(db: Session) -> int:
     if model is None:
         return 0
     defaults = {
-        "FAST": (2400, 60, 1, "FAST_BACKUP"),
+        "FAST": (10000, 150, 1, "FAST_BACKUP"),
         "DEEP": (6000, 120, 0, "DEEP_BACKUP"),
     }
     created = 0

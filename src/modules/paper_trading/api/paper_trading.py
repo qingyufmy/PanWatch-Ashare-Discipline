@@ -1,6 +1,7 @@
 """模拟盘 API 端点。"""
 
 import logging
+import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +17,7 @@ from src.modules.paper_trading.paper_trading_engine import (
     market_allocations_or_default,
     normalize_allocations,
 )
+from src.modules.paper_trading.portfolio_paper import paper_mode
 from src.modules.portfolio.portfolio_diagnostics import diagnose_paper_portfolio
 from src.modules.strategy.quant_adapters import available_backends
 from src.platform.persistence.database import get_db
@@ -25,6 +27,8 @@ from src.platform.persistence.models import (
     PaperTradingAccount,
     PaperTradingPosition,
     PaperTradingTrade,
+    PaperPortfolioFill,
+    PaperPortfolioNav,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,6 +102,21 @@ def _build_equity_curve(
     db: Session, acc: PaperTradingAccount, market: str | None
 ) -> tuple[list[dict], float, float]:
     """构建收益曲线，返回 (curve, peak, max_drawdown_pct)。market=None 为全市场。"""
+    if paper_mode(db) and (market is None or market == "CN"):
+        rows = db.query(PaperPortfolioNav).order_by(PaperPortfolioNav.trade_date).all()
+        curve = [{"date": row.trade_date, "equity": round(row.equity, 2)} for row in rows]
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        if not curve or curve[-1]["date"] < today:
+            positions = db.query(PaperTradingPosition).filter_by(stock_market="CN", status="open").all()
+            equity = acc.current_capital + sum((p.current_price or p.entry_price) * p.quantity
+                                               for p in positions)
+            curve.append({"date": today, "equity": round(equity, 2)})
+        peak = acc.initial_capital
+        drawdown = 0.0
+        for point in curve:
+            peak = max(peak, point["equity"])
+            drawdown = max(drawdown, 100 * (peak - point["equity"]) / peak)
+        return curve, peak, drawdown
     ratio = market_allocations_or_default(acc).get(market, 0.0) if market else 1.0
     base = acc.initial_capital * ratio if market else acc.initial_capital
 
@@ -170,6 +189,27 @@ def _build_equity_curve(
 
 def _account_summary(db: Session, acc: PaperTradingAccount, market: str | None) -> dict:
     """账户汇总。market=None 为全账户（沿用引擎维护的回撤）；否则按该市场子池口径。"""
+    if paper_mode(db) and (market is None or market == "CN"):
+        open_positions = db.query(PaperTradingPosition).filter_by(status="open", stock_market="CN").all()
+        market_value = sum((p.current_price or p.entry_price) * p.quantity for p in open_positions)
+        equity = acc.current_capital + market_value
+        out = _serialize_account_dict(
+            acc, initial=acc.initial_capital, cash=acc.current_capital,
+            total_equity=equity, total_pnl=equity - acc.initial_capital,
+            unrealized=sum(p.unrealized_pnl or 0 for p in open_positions),
+            total_trades=acc.total_trades, winning_trades=acc.winning_trades,
+            max_dd=acc.max_drawdown_pct, peak=acc.peak_capital,
+            market=market, ratio=1.0 if market else None,
+        )
+        baseline = db.query(AppSettings).filter_by(key="portfolio_paper_baseline").first()
+        out["paper_mode"] = "PAPER_ONLY"
+        raw = json.loads(baseline.value) if baseline and baseline.value else None
+        out["baseline"] = ({key: raw.get(key) for key in (
+            "trade_date", "nav_source", "synthetic_cash", "quote_source",
+            "cash_source", "truth_snapshot_id")}
+            if isinstance(raw, dict) else None)
+        out["realized_pnl"] = round(acc.total_pnl, 2)
+        return out
     if not market or market not in ALL_MARKETS:
         open_positions = (
             db.query(PaperTradingPosition)
@@ -308,6 +348,7 @@ def _position_response(p: PaperTradingPosition) -> dict:
         "stock_name": p.stock_name or "",
         "quantity": p.quantity,
         "entry_price": p.entry_price,
+        "source_cost_price": p.source_cost_price,
         "stop_loss": p.stop_loss,
         "target_price": p.target_price,
         "current_price": p.current_price,
@@ -393,6 +434,17 @@ def list_trades(limit: int = 50, offset: int = 0, market: str | None = None, db:
     }
 
 
+@router.get("/portfolio-fills")
+def list_portfolio_fills(limit: int = 100, db: Session = Depends(get_db)):
+    rows = (db.query(PaperPortfolioFill).order_by(PaperPortfolioFill.filled_at.desc())
+            .limit(max(1, min(limit, 300))).all())
+    return [{"signal_id": r.signal_id, "trade_date": r.trade_date,
+             "symbol": r.symbol, "action": r.action, "quantity": r.quantity,
+             "price": r.price, "fees": r.fees, "cash_delta": r.cash_delta,
+             "quote_asof": _format_dt(r.quote_asof), "filled_at": _format_dt(r.filled_at),
+             "policy_scope": r.policy_scope, "details": r.details} for r in rows]
+
+
 @router.get("/metrics")
 def get_metrics(market: str | None = None, db: Session = Depends(get_db)):
     acc = db.query(PaperTradingAccount).first()
@@ -440,7 +492,9 @@ def toggle_account(body: ToggleBody, db: Session = Depends(get_db)):
 
 
 @router.post("/account/reset")
-def reset_account():
+def reset_account(db: Session = Depends(get_db)):
+    if paper_mode(db):
+        raise HTTPException(409, "持仓镜像模式不可直接重置，请先归档并停用该模式")
     result = ENGINE.reset_account()
     if not result.get("ok"):
         raise HTTPException(500, "重置失败")
@@ -448,7 +502,9 @@ def reset_account():
 
 
 @router.post("/positions/{position_id}/close")
-async def close_position(position_id: int):
+async def close_position(position_id: int, db: Session = Depends(get_db)):
+    if paper_mode(db):
+        raise HTTPException(409, "持仓镜像由冻结信号驱动，请使用独立的模拟执行记录")
     result = await ENGINE.close_position_manual_async(position_id)
     if not result.get("ok"):
         raise HTTPException(400, result.get("error", "平仓失败"))
@@ -460,6 +516,9 @@ def update_settings(body: UpdateSettingsBody, db: Session = Depends(get_db)):
     acc = db.query(PaperTradingAccount).first()
     if not acc:
         raise HTTPException(404, "模拟盘账户不存在")
+    if paper_mode(db) and (body.initial_capital is not None or
+                           body.market_allocations is not None or body.excluded_markets is not None):
+        raise HTTPException(409, "持仓镜像资金基线和市场范围已冻结")
 
     if body.market_allocations is not None:
         alloc = normalize_allocations(body.market_allocations)

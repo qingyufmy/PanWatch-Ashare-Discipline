@@ -58,17 +58,77 @@ class PortfolioActionPlan(BaseModel):
 
 PROMPTS = {
     "flash": ("FAST", "Return one JSON PortfolioActionPlan for the supplied holdings. "
-              "Cover each holding exactly once. Use HOLD when evidence is uncertain. "
-              "Keep each rationale under 12 words and use short evidence references. "
+              "Cover each holding exactly once. First assess the source-labelled CN indices, "
+              "candidate-sample breadth, and global technology observations. Describe their "
+              "agreement or disagreement and a bounded whole-portfolio exposure in "
+              "portfolio_rationale. Give each holding a target_weight as a portfolio weight "
+              "when supported by evidence and explain ADD more carefully than HOLD. "
+              "Treat missing timestamps, stale quotes, sample breadth and unverified global "
+              "technology as uncertainty, never as confirmation. Auction and intraday data "
+              "must confirm directional proposals before a paper fill. Use HOLD when evidence "
+              "is insufficient. Do not invent prices, fills, broker cash or sellable quantity. "
               "Never claim an order was placed. No prose outside JSON."),
     "deep": ("DEEP", "Review the portfolio evidence and return one JSON PortfolioActionPlan. "
              "Cover every holding exactly once; cite evidence_refs for each proposal. "
              "Treat stale or missing inputs as HOLD. Never claim execution. No prose outside JSON."),
-    "review": ("FAST", "Review an existing portfolio proposal and evidence. "
-               "Return one JSON PortfolioActionPlan with every holding exactly once. "
-               "Resolve conflicts conservatively as HOLD. Never claim execution. No prose outside JSON."),
+    "review": ("FAST", "Review the frozen whole-portfolio evidence and current index, sector "
+               "and holding quotes. Return one JSON PortfolioActionPlan with every holding "
+               "exactly once. Set target_weight for supported position changes and provide "
+               "explicit qty_hint. ADD requires fresh stock and index confirmation, adequate "
+               "cash and a risk limit; otherwise HOLD. An intraday round trip needs separate "
+               "sell and later buy signals and cannot sell shares bought today. Treat missing "
+               "or timeless evidence as uncertain. Never claim execution. No prose outside JSON."),
 }
-PROMPT_VERSION = "1.0.2"
+PROMPT_VERSION = "1.0.3"
+NOTIFICATION_CANDIDATE_VERSION = "1.1.0-notification-candidate"
+
+
+def seed_notification_candidate_prompts(db: Session) -> int:
+    """Store the stricter contract for replay; never activate it at startup."""
+    created = 0
+    output_schema = {
+        "type": "object", "required": ["trade_date", "proposals"],
+        "properties": {
+            "trade_date": {"type": "string"},
+            "proposals": {"type": "array", "items": {"type": "object", "required": [
+                "market", "symbol", "action", "decision_status", "fact_refs", "invalidation_refs",
+            ], "properties": {
+                "market": {"const": "CN"}, "symbol": {"type": "string"},
+                "action": {"enum": ["ADD", "REDUCE", "HOLD", "EXIT", None]},
+                "decision_status": {"enum": ["PROPOSED", "DATA_UNKNOWN", "MODEL_FAILED"]},
+                "fact_refs": {"type": "array", "items": {"type": "string"}},
+                "invalidation_refs": {"type": "array", "items": {"type": "string"}},
+                "escalate": {"type": "boolean"},
+            }}},
+        },
+    }
+    for prompt_id in ("flash", "deep", "review"):
+        if db.query(PromptVersion).filter_by(prompt_id=prompt_id,
+                                              version=NOTIFICATION_CANDIDATE_VERSION).first():
+            continue
+        role = "DEEP" if prompt_id == "deep" else "FAST"
+        template = (
+            "Use only frozen evidence references supplied in the context. "
+            "Return one JSON proposal per held CN position. Missing data must use action=null "
+            "and decision_status=DATA_UNKNOWN, never HOLD. Do not invent prices, shares, "
+            "executions or broker confirmation. Cite at most three fact_refs. "
+            "A proposed action is not an approved or executed trade."
+        )
+        db.add(PromptVersion(
+            prompt_id=prompt_id, version=NOTIFICATION_CANDIDATE_VERSION,
+            system_template=template,
+            input_schema={"type": "object", "required": ["trade_date", "positions", "feature_snapshot_refs"]},
+            output_schema=output_schema, model_role=role,
+            change_reason="Candidate fact-reference and unknown-state contract; replay before activation",
+            parent_version=PROMPT_VERSION,
+            prompt_hash=prompt_digest(prompt_id, NOTIFICATION_CANDIDATE_VERSION, template,
+                                      {"type": "object", "required": ["trade_date", "positions", "feature_snapshot_refs"]},
+                                      output_schema, role),
+            status="CANDIDATE",
+        ))
+        created += 1
+    db.commit()
+    return created
 
 
 def prompt_digest(prompt_id: str, version: str, system_template: str,
@@ -86,15 +146,13 @@ def seed_prompts(db: Session) -> int:
         if db.query(PromptVersion).filter_by(prompt_id=prompt_id, version=PROMPT_VERSION).first():
             continue
         prior = db.query(PromptVersion).filter_by(prompt_id=prompt_id, status="ACTIVE").order_by(PromptVersion.id.desc()).first()
-        for old in db.query(PromptVersion).filter_by(prompt_id=prompt_id, status="ACTIVE").all():
-            old.status = "ARCHIVED"
         db.add(PromptVersion(
             prompt_id=prompt_id, version=PROMPT_VERSION, system_template=template,
             input_schema=input_schema, output_schema=output_schema,
             model_role=role, change_reason="Compact all-holdings JSON contract",
             parent_version=prior.version if prior else None,
             prompt_hash=prompt_digest(prompt_id, PROMPT_VERSION, template, input_schema, output_schema, role),
-            status="ACTIVE",
+            status="ACTIVE" if prior is None else "CANDIDATE",
         ))
         created += 1
     db.commit()

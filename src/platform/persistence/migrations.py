@@ -2190,6 +2190,120 @@ def _m134_portfolio_daily_workflow(conn: Connection) -> None:
     """))
 
 
+def _m135_portfolio_feature_and_level_snapshots(conn: Connection) -> None:
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS portfolio_feature_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,
+            trade_date TEXT NOT NULL, version TEXT NOT NULL,
+            source_vendor TEXT NOT NULL, market_asof DATETIME NOT NULL,
+            fetched_at DATETIME NOT NULL, source_hash TEXT NOT NULL,
+            quality_status TEXT NOT NULL, payload JSON NOT NULL
+        )
+    """))
+    _create_index_if_missing(conn, "ix_portfolio_feature_symbol_asof",
+                            "CREATE INDEX ix_portfolio_feature_symbol_asof ON portfolio_feature_snapshots(symbol, market_asof, id)")
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS portfolio_level_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,
+            trade_date TEXT NOT NULL, version TEXT NOT NULL,
+            feature_snapshot_id INTEGER NOT NULL REFERENCES portfolio_feature_snapshots(id),
+            prior_level_snapshot_id INTEGER REFERENCES portfolio_level_snapshots(id),
+            market_asof DATETIME NOT NULL, source_hash TEXT NOT NULL,
+            quality_status TEXT NOT NULL, payload JSON NOT NULL
+        )
+    """))
+    _create_index_if_missing(conn, "ix_portfolio_level_symbol_asof",
+                            "CREATE INDEX ix_portfolio_level_symbol_asof ON portfolio_level_snapshots(symbol, market_asof, id)")
+
+
+def _m136_portfolio_decisions_and_notification_outbox(conn: Connection) -> None:
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS portfolio_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, trade_date TEXT NOT NULL,
+            market TEXT NOT NULL, symbol TEXT NOT NULL, revision INTEGER NOT NULL,
+            signal_id TEXT NOT NULL REFERENCES signal_events(signal_id),
+            plan_version INTEGER, level_snapshot_id INTEGER REFERENCES portfolio_level_snapshots(id),
+            action TEXT NOT NULL, approved_qty INTEGER,
+            decision_status TEXT NOT NULL, risk_status TEXT NOT NULL,
+            data_status TEXT NOT NULL, execution_status TEXT NOT NULL,
+            semantic_hash TEXT NOT NULL, current BOOLEAN NOT NULL DEFAULT 1,
+            created_at DATETIME NOT NULL, expires_at DATETIME NOT NULL,
+            CONSTRAINT uq_portfolio_decision_revision UNIQUE (trade_date, symbol, revision)
+        )
+    """))
+    _create_index_if_missing(conn, "ix_portfolio_decision_current",
+                            "CREATE INDEX ix_portfolio_decision_current ON portfolio_decisions(symbol, current, id)")
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS portfolio_notifications (
+            id TEXT PRIMARY KEY, semantic_key TEXT NOT NULL UNIQUE,
+            trade_date TEXT NOT NULL, symbol TEXT,
+            decision_id INTEGER REFERENCES portfolio_decisions(id),
+            signal_ids JSON NOT NULL, channel_id INTEGER REFERENCES notify_channels(id),
+            template_version TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+            rendered_content_hash TEXT NOT NULL, decision_revision INTEGER,
+            priority TEXT NOT NULL, reason TEXT NOT NULL, suppression_reason TEXT,
+            queued_at DATETIME NOT NULL, attempt_started_at DATETIME,
+            provider_accepted_at DATETIME, delivery_status TEXT NOT NULL,
+            provider_message_id TEXT, ack_status TEXT NOT NULL DEFAULT 'NOT_OBSERVED',
+            retry_count INTEGER NOT NULL DEFAULT 0, supersedes_id TEXT,
+            expires_at DATETIME
+        )
+    """))
+    _create_index_if_missing(conn, "ix_portfolio_notification_state",
+                            "CREATE INDEX ix_portfolio_notification_state ON portfolio_notifications(delivery_status, expires_at)")
+
+
+def _m137_manual_execution_idempotency(conn: Connection) -> None:
+    _add_column_if_missing(conn, "execution_events", "client_request_id",
+                           "ALTER TABLE execution_events ADD COLUMN client_request_id TEXT")
+    _create_index_if_missing(conn, "ux_execution_client_request_id",
+                            "CREATE UNIQUE INDEX ux_execution_client_request_id ON execution_events(client_request_id)")
+
+
+def _m138_security_rules(conn: Connection) -> None:
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS security_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, market TEXT NOT NULL,
+            symbol TEXT NOT NULL, price_tick REAL NOT NULL,
+            min_buy_qty INTEGER NOT NULL, buy_step INTEGER NOT NULL,
+            min_sell_qty INTEGER NOT NULL, sell_step INTEGER NOT NULL,
+            source TEXT NOT NULL, source_asof DATETIME NOT NULL,
+            quality_status TEXT NOT NULL,
+            CONSTRAINT uq_security_rule_symbol UNIQUE (market, symbol)
+        )
+    """))
+
+
+def _m139_portfolio_paper_fills(conn: Connection) -> None:
+    _add_column_if_missing(conn, "daily_portfolio_plans", "macro_evidence_snapshot_id",
+                           "ALTER TABLE daily_portfolio_plans ADD COLUMN macro_evidence_snapshot_id INTEGER")
+    _add_column_if_missing(conn, "paper_trading_positions", "source_cost_price",
+                           "ALTER TABLE paper_trading_positions ADD COLUMN source_cost_price REAL")
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS paper_portfolio_fills (
+            signal_id TEXT PRIMARY KEY, trade_date TEXT NOT NULL,
+            symbol TEXT NOT NULL, action TEXT NOT NULL,
+            quantity INTEGER NOT NULL, price REAL NOT NULL,
+            fees REAL NOT NULL, cash_delta REAL NOT NULL,
+            quote_asof DATETIME NOT NULL, filled_at DATETIME NOT NULL,
+            policy_scope TEXT NOT NULL, details JSON NOT NULL
+        )
+    """))
+    _create_index_if_missing(conn, "ix_paper_portfolio_fills_day",
+                            "CREATE INDEX ix_paper_portfolio_fills_day ON paper_portfolio_fills(trade_date, symbol)")
+
+
+def _m140_paper_portfolio_nav(conn: Connection) -> None:
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS paper_portfolio_nav (
+            trade_date TEXT PRIMARY KEY, cash REAL NOT NULL,
+            market_value REAL NOT NULL, equity REAL NOT NULL,
+            source_asof_min DATETIME NOT NULL, captured_at DATETIME NOT NULL,
+            position_count INTEGER NOT NULL, source TEXT NOT NULL
+        )
+    """))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(101, "agent_config_kind_and_visibility", _m101_agent_config_kind),
     Migration(102, "backfill_agent_kind_data", _m102_backfill_agent_kind),
@@ -2225,6 +2339,12 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(132, "model_run_output_evidence", _m132_model_run_output_evidence),
     Migration(133, "system_issues", _m133_system_issues),
     Migration(134, "portfolio_daily_workflow", _m134_portfolio_daily_workflow),
+    Migration(135, "portfolio_feature_and_level_snapshots", _m135_portfolio_feature_and_level_snapshots),
+    Migration(136, "portfolio_decisions_and_notification_outbox", _m136_portfolio_decisions_and_notification_outbox),
+    Migration(137, "manual_execution_idempotency", _m137_manual_execution_idempotency),
+    Migration(138, "security_rules", _m138_security_rules),
+    Migration(139, "portfolio_paper_fills", _m139_portfolio_paper_fills),
+    Migration(140, "paper_portfolio_nav", _m140_paper_portfolio_nav),
 )
 
 

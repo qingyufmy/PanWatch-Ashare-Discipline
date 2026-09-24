@@ -7,6 +7,7 @@ persisted before an actionable envelope can be created.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -17,14 +18,15 @@ from src.modules.portfolio.signal_journal import transition_signal, utc_naive
 from src.platform.persistence.models import (
     ActionableSignal, EvidenceSnapshot, NextDayAction,
     PortfolioTruthSnapshot, SignalEvent, SignalPolicyDecision,
+    SecurityRule,
 )
 from src.platform.scheduling.trading_calendar import next_confirmed_cn_trading_day
 
 
-POLICY_VERSION = "p3-v1"
+POLICY_VERSION = "p3-v2-candidate"
 RULE_IDS = (
-    "SIGNAL_TTL", "SCHEMA_INVALID", "MODEL_CONFLICT", "DATA_FRESHNESS",
-    "PORTFOLIO_TRUTH", "MAX_POSITION", "THESIS_INVALID", "STOP_WIDENING",
+    "SIGNAL_TTL", "ACTION_RESOLUTION", "SCHEMA_INVALID", "MODEL_CONFLICT", "DATA_FRESHNESS",
+    "PORTFOLIO_TRUTH", "SECURITY_RULES", "MAX_POSITION", "THESIS_INVALID", "STOP_WIDENING",
     "HARD_STOP", "T_PLUS_ONE", "DUPLICATE",
 )
 CHANGING_ACTIONS = frozenset({"OPEN", "ADD", "REDUCE", "EXIT"})
@@ -45,7 +47,8 @@ def _number(value: Any) -> float | None:
     if isinstance(value, bool) or value is None:
         return None
     try:
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else None
     except (TypeError, ValueError):
         return None
 
@@ -90,6 +93,8 @@ def evaluate_signal(
 
     decide("SIGNAL_TTL", "EXPIRED" if timestamp >= signal.expires_at or timestamp < signal.valid_from else "PASS",
            "SIGNAL_OUTSIDE_VALID_WINDOW" if timestamp >= signal.expires_at or timestamp < signal.valid_from else "")
+    decide("ACTION_RESOLUTION", "REVIEW" if signal.action == "REVIEW" else "PASS",
+           "ACTION_DIRECTION_UNRESOLVED" if signal.action == "REVIEW" else "")
     schema_valid = payload.get("schema_valid", meta.get("schema_valid")) is True
     decide("SCHEMA_INVALID", "PASS" if schema_valid else "REVIEW", "SCHEMA_NOT_ATTESTED" if not schema_valid else "")
     conflict = bool(payload.get("model_conflict", meta.get("model_conflict", False)))
@@ -110,10 +115,22 @@ def evaluate_signal(
     decide("PORTFOLIO_TRUTH", "PASS" if trusted or not changing else "REVIEW",
            "TRUTH_OR_PLAN_UNTRUSTED" if changing and not trusted else "")
 
+    security = db.query(SecurityRule).filter_by(market=signal.market, symbol=signal.symbol).first()
+    security_valid = bool(
+        security and security.quality_status == "VERIFIED" and security.source
+        and _number(security.price_tick) and security.price_tick > 0
+        and security.min_buy_qty > 0 and security.buy_step > 0
+        and security.min_sell_qty > 0 and security.sell_step > 0
+    )
+    tick_valid = bool(current_price and security_valid and
+                      abs(current_price / security.price_tick - round(current_price / security.price_tick)) < 1e-5)
+    decide("SECURITY_RULES", "PASS" if not changing or (security_valid and tick_valid) else "REVIEW",
+           "SECURITY_MASTER_OR_TICK_UNVERIFIED" if changing and not (security_valid and tick_valid) else "")
+
     if signal.action in {"OPEN", "ADD"}:
         max_weight = _number(plan_position.get("max_weight"))
         target = _number(signal.target_weight)
-        if max_weight is None or target is None or max_weight <= 0 or target < 0 or signal.qty_hint is None:
+        if max_weight is None or target is None or max_weight <= 0 or target < 0:
             decide("MAX_POSITION", "REVIEW", "WEIGHT_LIMIT_UNKNOWN")
         elif target > max_weight:
             decide("MAX_POSITION", "BLOCK", "MAX_WEIGHT_EXCEEDED")
@@ -141,20 +158,40 @@ def evaluate_signal(
     else:
         decide("HARD_STOP", "PASS")
 
-    approved_qty: int | None = signal.qty_hint
+    approved_qty: int | None = None
     defer_qty = 0
-    if signal.action in {"REDUCE", "EXIT"}:
-        wanted = signal.qty_hint
-        if signal.action == "EXIT" and wanted is None and truth_position:
-            wanted = truth_position.total_qty
+    if signal.action == "ADD":
+        nav, cash, target = _number(truth.nav) if truth else None, _number(truth.cash) if truth else None, _number(signal.target_weight)
+        if not (truth_position and security_valid and current_price and nav and nav > 0
+                and cash is not None and cash >= 0 and target is not None):
+            decide("T_PLUS_ONE", "REVIEW", "ADD_QUANTITY_INPUT_UNVERIFIED")
+        else:
+            desired_value = max(0.0, target * nav - truth_position.total_qty * current_price)
+            approved_qty = math.floor(min(desired_value, cash) / (current_price * security.buy_step)) * security.buy_step
+            decide("T_PLUS_ONE", "PASS" if approved_qty >= security.min_buy_qty else "REVIEW",
+                   "LOCAL_ADD_BELOW_MINIMUM" if approved_qty < security.min_buy_qty else "")
+    elif signal.action in {"REDUCE", "EXIT"}:
+        nav = _number(truth.nav) if truth else None
+        target = _number(signal.target_weight)
+        wanted = truth_position.total_qty if signal.action == "EXIT" and truth_position else None
+        if signal.action == "REDUCE" and truth_position and current_price and nav and nav > 0 and target is not None:
+            target_qty = max(0, math.floor(target * nav / current_price))
+            wanted = max(0, truth_position.total_qty - target_qty)
         sellable = truth_position.sellable_qty if truth_position else None
-        if wanted is None or wanted <= 0 or sellable is None:
+        if wanted is None or wanted <= 0 or sellable is None or not security_valid:
             decide("T_PLUS_ONE", "REVIEW", "SELL_QUANTITY_OR_SELLABLE_UNKNOWN")
         else:
-            approved_qty = min(wanted, sellable)
+            possible = min(wanted, sellable)
+            if signal.action == "EXIT" and possible == truth_position.total_qty:
+                approved_qty = possible  # Entire odd-lot remainder is sold together.
+            else:
+                approved_qty = math.floor(possible / security.sell_step) * security.sell_step
             defer_qty = wanted - approved_qty
-            decide("T_PLUS_ONE", "PASS" if approved_qty > 0 else "REVIEW",
-                   "PARTIAL_SELL_DEFERRED" if defer_qty else "")
+            valid_sell = approved_qty >= security.min_sell_qty or (
+                signal.action == "EXIT" and approved_qty == truth_position.total_qty)
+            decide("T_PLUS_ONE", "PASS" if valid_sell else "REVIEW",
+                   "PARTIAL_SELL_DEFERRED" if defer_qty and valid_sell else
+                   "SELL_BELOW_MINIMUM" if not valid_sell else "")
     else:
         decide("T_PLUS_ONE", "PASS")
 

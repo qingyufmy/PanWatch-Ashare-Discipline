@@ -13,22 +13,32 @@ from pathlib import Path
 from typing import Awaitable, Callable
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from src.modules.portfolio.discipline import capture_truth, logical_hash
 from src.modules.portfolio.issue_ledger import record_issue
-from src.modules.portfolio.minute_features import feature_snapshot, fetch_minute_bars, write_parquet
-from src.modules.portfolio.notifications import send_portfolio_notice
+from src.modules.portfolio.minute_features import (
+    feature_snapshot, fetch_minute_bars, load_historical_bars, write_parquet,
+)
+from src.modules.portfolio.technical_levels import derive_level_snapshot, LEVEL_VERSION
+from src.modules.portfolio.notifications import (
+    dispatch_portfolio_notice, enqueue_portfolio_notice, send_portfolio_notice,
+)
+from src.modules.portfolio.notification_renderer import render_daily_review, render_premarket_plan
+from src.modules.portfolio.decision_router import record_position_decision
 from src.modules.portfolio.model_router import probe_role
+from src.modules.portfolio.market_context import collect_market_context
 from src.modules.portfolio.prompt_registry import run_portfolio_prompt
 from src.modules.portfolio.signal_journal import record_signal
 from src.modules.portfolio.policy_gate import evaluate_signal
 from src.platform.persistence.database import SessionLocal
 from src.platform.persistence.models import (
-    DailyPortfolioPlan, ExecutionEvent, ModelProfile, ModelRun, NewsCache,
+    AppSettings, DailyPortfolioPlan, EvidenceSnapshot, ExecutionEvent, ModelProfile, ModelRun, NewsCache,
     NextDayAction, PortfolioTruthSnapshot, PortfolioWorkflowRun,
-    PositionPlan, SignalEvent,
+    PositionPlan, SignalEvent, PortfolioFeatureSnapshot, PortfolioLevelSnapshot,
+    PortfolioDecision, PortfolioNotification, PaperTradingAccount, PaperTradingPosition,
 )
 from src.platform.scheduling import trading_calendar
 from src.platform.scheduling.trading_calendar import next_confirmed_cn_trading_day
@@ -42,6 +52,7 @@ FIXED_STEPS = (
     ("OVERNIGHT_INTAKE", "07:30"), ("RISK_SCAN", "08:00"),
     ("DEEP_REVIEW", "08:20"), ("PREMARKET_PLAN", "08:50"),
     ("AUCTION_MODE", "09:15"), ("OPEN_CONFIRM", "09:25"),
+    ("MORNING_ADJUST", "10:00"), ("AFTERNOON_ADJUST", "13:30"),
     ("MIDDAY_REVIEW", "11:35"), ("NOON_REFRESH", "12:50"),
     ("CLOSING_RISK", "14:30"), ("EXECUTION_AUDIT", "14:50"),
     ("EOD_TRUTH", "15:05"), ("DAILY_REVIEW", "15:30"),
@@ -49,7 +60,7 @@ FIXED_STEPS = (
     ("EVENING_DEEP", "20:45"), ("NEXT_DAY_DRAFT", "21:10"),
     ("P10_REVIEW", "21:20"),
 )
-MONITOR_STARTS = ((time(9, 30), time(11, 30)), (time(13, 0), time(14, 30)))
+MONITOR_STARTS = ((time(9, 30), time(11, 30)), (time(13, 0), time(15, 0)))
 
 
 def _now_sh(now: datetime | None = None) -> datetime:
@@ -78,6 +89,39 @@ def _positions(truth: PortfolioTruthSnapshot | None) -> list[dict]:
 
 def _status(reason: str, **data) -> dict:
     return {"status": "REVIEW", "reason": reason, **data}
+
+
+def _paper_state(db: Session) -> dict | None:
+    mode = db.query(AppSettings).filter_by(key="portfolio_paper_mode").first()
+    if not mode or mode.value != "paper_only":
+        return None
+    account = db.query(PaperTradingAccount).first()
+    if account is None:
+        return None
+    rows = db.query(PaperTradingPosition).filter_by(stock_market="CN", status="open").all()
+    positions = [{"symbol": row.stock_symbol, "quantity": row.quantity,
+                  "mark_price": row.current_price or row.entry_price} for row in rows]
+    return {"scope": "PAPER_ONLY", "cash_source": "synthetic_baseline_plus_paper_fills",
+            "cash": account.current_capital,
+            "marked_equity": account.current_capital + sum(p["quantity"] * p["mark_price"]
+                                                          for p in positions),
+            "positions": positions}
+
+
+def _position_limits(db: Session, positions: list[dict]) -> list[dict]:
+    limits = []
+    for position in positions:
+        plan = (db.query(PositionPlan).filter_by(market=position["market"], symbol=position["symbol"])
+                .order_by(PositionPlan.version.desc()).first())
+        payload = plan.plan if plan and isinstance(plan.plan, dict) else {}
+        position_rule = payload.get("position") if isinstance(payload.get("position"), dict) else {}
+        risk_rule = payload.get("risk") if isinstance(payload.get("risk"), dict) else {}
+        limits.append({"symbol": position["symbol"],
+                       "max_weight": position_rule.get("max_weight"),
+                       "current_stop": risk_rule.get("current_stop"),
+                       "thesis_state": plan.thesis_state if plan else "UNKNOWN",
+                       "plan_version": plan.version if plan else None})
+    return limits
 
 
 async def _health_probe(day: str, db_factory) -> dict:
@@ -167,7 +211,8 @@ def _risk_scan(day: str, db_factory, *, asof: datetime | None = None,
                       "YELLOW": "STOP_OR_FRESH_PRICE_UNVERIFIED"}[color]
             rows.append({"symbol": p.symbol, "color": color, "reason": reason,
                          "price": price, "market_data_asof": market_asof, "market_data_source": source,
-                         "current_stop": stop, "sellable_qty": p.sellable_qty})
+                         "current_stop": stop, "sellable_qty": p.sellable_qty,
+                         "plan_version": plan.version if plan else None})
             if color == "RED" and source == "tencent_quote":
                 pending_confirmations[len(rows) - 1] = _MINUTE_VERIFY_POOL.submit(
                     minute_fetcher, _vendor_symbol(p.symbol), day,
@@ -213,7 +258,9 @@ async def _feature_refresh(day: str, db_factory, now: datetime) -> dict:
         try:
             frame, failures = await asyncio.to_thread(fetch_minute_bars, symbol, day)
             path = write_parquet(frame, MINUTE_ROOT)
-            feature = feature_snapshot(frame)
+            history = await asyncio.to_thread(load_historical_bars, MINUTE_ROOT, symbol, day)
+            feature = feature_snapshot(frame, decision_time=now, history=history)
+            level_frame = pd.concat([history, frame], ignore_index=True) if not history.empty else frame
             market_asof = datetime.fromisoformat(feature["market_data_asof"])
             age = (now.astimezone(SH) - market_asof).total_seconds()
             status = "OK" if -30 <= age <= 120 and not feature["missing_minutes"] else "STALE"
@@ -222,10 +269,38 @@ async def _feature_refresh(day: str, db_factory, now: datetime) -> dict:
                     record_issue(db, category="DATA_STALE", code="MINUTE_FRESHNESS", source=feature["market_data_source"],
                                  title="Minute data stale or incomplete",
                                  context={"symbol": position["symbol"], "asof": feature["market_data_asof"],
-                                          "age_seconds": int(age), "missing": len(feature["missing_minutes"])})
+                                         "age_seconds": int(age), "missing": len(feature["missing_minutes"])})
+            with db_factory() as db:
+                prior = (db.query(PortfolioLevelSnapshot)
+                         .filter_by(symbol=symbol).order_by(PortfolioLevelSnapshot.id.desc()).first())
+                level = derive_level_snapshot(level_frame, feature, prior=prior.payload if prior else None,
+                                              decision_time=now)
+                existing = (db.query(PortfolioFeatureSnapshot).filter_by(symbol=symbol,
+                            source_hash=feature["source_hash"]).first())
+                if existing is None:
+                    asof_utc = market_asof.astimezone(timezone.utc).replace(tzinfo=None)
+                    fetched_utc = datetime.fromisoformat(str(frame.fetched_at.iloc[-1])).astimezone(timezone.utc).replace(tzinfo=None)
+                    feature_row = PortfolioFeatureSnapshot(
+                        symbol=symbol, trade_date=day, version=feature["feature_version"],
+                        source_vendor=feature["market_data_source"], market_asof=asof_utc,
+                        fetched_at=fetched_utc, source_hash=feature["source_hash"],
+                        quality_status=status, payload=feature,
+                    )
+                    db.add(feature_row)
+                    db.flush()
+                    db.add(PortfolioLevelSnapshot(
+                        symbol=symbol, trade_date=day, version=LEVEL_VERSION,
+                        feature_snapshot_id=feature_row.id,
+                        prior_level_snapshot_id=prior.id if prior else None,
+                        market_asof=asof_utc, source_hash=logical_hash(level),
+                        quality_status=level["quality_status"], payload=level,
+                    ))
+                    db.commit()
             return {"symbol": position["symbol"], "status": status, "path": str(path),
                     "asof": feature["market_data_asof"], "bar_count": feature["bar_count"],
                     "missing_count": len(feature["missing_minutes"]),
+                    "feature_version": feature["feature_version"],
+                    "level_quality": level["quality_status"],
                     "source_failures": failures}
         except Exception as exc:
             with db_factory() as db:
@@ -245,9 +320,27 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None) -> 
         positions = _positions(truth)
         if not positions:
             return _status("TRUTH_SNAPSHOT_MISSING", coverage=0)
-        evidence = {"portfolio_truth_status": truth.truth_status,
-                    "market_data_status": "PREMARKET_UNVERIFIED",
-                    "truth_snapshot_id": truth.id}
+        truth_id = truth.id
+    with db_factory() as db:
+        market = await collect_market_context(db, trade_date=day, phase="PREMARKET",
+                                              symbols=[p["symbol"] for p in positions], now=now)
+        paper_state = _paper_state(db)
+        limits = _position_limits(db, positions)
+        macro = EvidenceSnapshot(
+            captured_at=(now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(tzinfo=None),
+            source="portfolio_market_context", logical_hash=logical_hash(market),
+            payload=market, truth_snapshot_id=truth_id,
+        )
+        db.add(macro)
+        db.commit()
+        macro_id = macro.id
+    evidence = {"portfolio_truth_status": truth.truth_status,
+                "market_data_status": "PREMARKET_UNVERIFIED",
+                "truth_snapshot_id": truth_id,
+                "macro_evidence_snapshot_id": macro_id,
+                "market_context": market,
+                "paper_account": paper_state,
+                "position_limits": limits}
     payload = {"trade_date": day, "positions": positions, "evidence": evidence}
     try:
         proposal, model = await run_portfolio_prompt("flash", payload, db_factory=db_factory)
@@ -264,19 +357,24 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None) -> 
         existing = db.query(DailyPortfolioPlan).filter_by(trade_date=day).order_by(DailyPortfolioPlan.version.desc()).first()
         version = (existing.version + 1) if existing else 1
         plan = DailyPortfolioPlan(trade_date=day, version=version, status="REVIEW_ONLY",
-                                  truth_snapshot_id=truth.id, model_run_id=model.run_id,
+                                  truth_snapshot_id=truth_id, macro_evidence_snapshot_id=macro_id,
+                                  model_run_id=model.run_id,
                                   prompt_id="flash", prompt_version=prompt_version,
                                   input_hash=logical_hash(payload), output_hash=logical_hash(frozen),
                                   payload=frozen)
         db.add(plan)
-        db.commit()
+        db.flush()
         signal_ids = []
+        signals = []
         for action in proposal.proposals:
             evidence_payload = {"schema_valid": True, "model_conflict": False,
                                 "market_data_source": None, "market_data_asof": None,
                                 "evidence_refs": action.evidence_refs,
-                                "rationale": action.rationale,
-                                "meta": {"quote": {"current_price": None}}}
+                                "rationale": action.rationale, "confidence": action.confidence,
+                                "model_run_id": model.run_id,
+                                "macro_evidence_snapshot_id": macro_id,
+                                "meta": {"quote": {"current_price": None},
+                                         "market_context_risk_tone": market["risk_tone"]}}
             signal, created = record_signal(
                 db, market=action.market, symbol=action.symbol, action=action.action,
                 source="daily_portfolio_plan", source_agent="portfolio_flash",
@@ -285,20 +383,110 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None) -> 
                 qty_hint=action.qty_hint, target_weight=action.target_weight,
                 prompt_id="flash", prompt_version=prompt_version, model_role=model.requested_role,
                 requested_model=model.requested_model, reported_model=model.reported_model,
+                commit=False,
             )
             if created:
-                evaluate_signal(db, signal.signal_id, now=now)
+                evaluate_signal(db, signal.signal_id, now=now, commit=False)
+                record_position_decision(db, signal, now=now)
             signal_ids.append(signal.signal_id)
+            signals.append(signal)
+        title, content = render_premarket_plan(proposal.proposals, signals, positions)
+        notice, _ = enqueue_portfolio_notice(
+            db, key=f"plan:{day}:{version}", title=title, content=content,
+            trade_date=day, signal_ids=signal_ids, reason="PREMARKET_PLAN",
+        )
+        notice_id = notice.id
+        db.commit()
         result = {"status": "REVIEW", "reason": "USER_ATTESTED_AND_PREMARKET_DATA_UNVERIFIED",
                   "daily_plan_id": plan.id, "daily_plan_version": version,
-                  "model_run_id": model.run_id, "coverage": len(proposal.proposals),
+                  "model_run_id": model.run_id, "macro_evidence_snapshot_id": macro_id,
+                  "coverage": len(proposal.proposals),
                   "signal_ids": signal_ids}
-    lines = [f"{p.symbol} {p.action}（待复核）" for p in proposal.proposals]
-    result["notification"] = await send_portfolio_notice(
-        key=f"plan:{day}", title=f"A股持仓盘前计划 {day}",
-        content=f"覆盖 {len(lines)} 只持仓；账户与盘前行情仍待核对，仅供人工参考。\n" + "\n".join(lines),
-        db_factory=db_factory, timeout_seconds=12)
+    result["notification"] = await dispatch_portfolio_notice(
+        notice_id, db_factory=db_factory, timeout_seconds=12)
     return result
+
+
+async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str) -> dict:
+    """Two bounded batch revisions using current market facts; paper fills remain separate."""
+    with db_factory() as db:
+        truth = _ensure_today_truth(db, day)
+        positions = _positions(truth)
+    if not positions:
+        return _status("TRUTH_SNAPSHOT_MISSING", coverage=0)
+    with db_factory() as db:
+        auction = (db.query(EvidenceSnapshot)
+                   .filter_by(source="portfolio_auction_context")
+                   .order_by(EvidenceSnapshot.id.desc()).first())
+        auction_id = (auction.id if auction and isinstance(auction.payload, dict)
+                      and auction.payload.get("trade_date") == day else None)
+        market = await collect_market_context(db, trade_date=day, phase="INTRADAY",
+                                              symbols=[p["symbol"] for p in positions], now=now)
+        paper_state = _paper_state(db)
+        limits = _position_limits(db, positions)
+        macro = EvidenceSnapshot(
+            captured_at=now.astimezone(timezone.utc).replace(tzinfo=None),
+            source="portfolio_market_context", logical_hash=logical_hash(market),
+            payload=market, truth_snapshot_id=truth.id,
+        )
+        db.add(macro)
+        db.commit()
+        macro_id = macro.id
+    fresh = {q.get("symbol") for q in market["holdings"] if q.get("quality") == "FRESH"}
+    if market["risk_tone"] == "UNVERIFIED" or len(fresh) < len(positions):
+        return _status("INTRADAY_MARKET_EVIDENCE_UNVERIFIED", macro_evidence_snapshot_id=macro_id,
+                       fresh_holding_count=len(fresh), coverage=len(positions))
+    payload = {"trade_date": day, "positions": positions,
+               "evidence": {"phase": phase, "truth_snapshot_id": truth.id,
+                            "macro_evidence_snapshot_id": macro_id,
+                            "auction_evidence_snapshot_id": auction_id,
+                            "market_context": market,
+                            "paper_account": paper_state,
+                            "position_limits": limits}}
+    try:
+        proposal, model = await run_portfolio_prompt("review", payload, db_factory=db_factory)
+    except Exception as exc:
+        with db_factory() as db:
+            record_issue(db, category="MODEL_SCHEMA_ERROR" if isinstance(exc, ValueError) else "MODEL_TIMEOUT",
+                         code=type(exc).__name__, source=phase,
+                         title="Intraday portfolio batch failed", context={"detail": str(exc)[:150]})
+        return _status("INTRADAY_MODEL_FAILED", error=type(exc).__name__,
+                       macro_evidence_snapshot_id=macro_id)
+    quote_by_symbol = {q.get("symbol"): q for q in market["holdings"]}
+    signal_ids = []
+    with db_factory() as db:
+        model_run = db.get(ModelRun, model.run_id)
+        prompt_version = model_run.prompt_version if model_run else None
+        for action in proposal.proposals:
+            quote = quote_by_symbol.get(action.symbol) or {}
+            frozen = {"schema_valid": True, "model_conflict": False,
+                      "market_data_source": quote.get("source"),
+                      "market_data_asof": quote.get("source_asof"),
+                      "evidence_refs": action.evidence_refs, "rationale": action.rationale,
+                      "confidence": action.confidence, "model_run_id": model.run_id,
+                      "macro_evidence_snapshot_id": macro_id,
+                      "auction_evidence_snapshot_id": auction_id,
+                      "meta": {"quote": {"current_price": quote.get("price")},
+                               "market_context_risk_tone": market["risk_tone"]}}
+            signal, created = record_signal(
+                db, market=action.market, symbol=action.symbol, action=action.action,
+                source="intraday_portfolio_plan", source_agent="portfolio_intraday",
+                evidence=frozen, ttl_seconds=1200, generated_at=now,
+                qty_hint=action.qty_hint, target_weight=action.target_weight,
+                prompt_id="review", prompt_version=prompt_version,
+                model_role=model.requested_role,
+                requested_model=model.requested_model, reported_model=model.reported_model,
+                commit=False,
+            )
+            if created:
+                evaluate_signal(db, signal.signal_id, now=now, commit=False)
+                record_position_decision(db, signal, now=now, queue_notification=False)
+            signal_ids.append(signal.signal_id)
+        db.commit()
+    return {"status": "REVIEW", "reason": "PAPER_ONLY_SIGNALS_REQUIRE_LIVE_FILL_GATE",
+            "model_run_id": model.run_id, "macro_evidence_snapshot_id": macro_id,
+            "signal_ids": signal_ids, "coverage": len(signal_ids),
+            "portfolio_rationale": proposal.portfolio_rationale}
 
 
 async def _model_review(day: str, db_factory, prompt_id: str, phase: str, evidence: dict) -> dict:
@@ -326,6 +514,8 @@ async def _model_review(day: str, db_factory, prompt_id: str, phase: str, eviden
 
 
 async def _simple_step(step: str, day: str, db_factory, now: datetime) -> dict:
+    if step in {"MORNING_ADJUST", "AFTERNOON_ADJUST"}:
+        return await _intraday_adjustment(day, db_factory, now, step)
     if step == "P10_REVIEW":
         import json
         from src.modules.portfolio.review_gate import review_snapshot
@@ -366,15 +556,39 @@ async def _simple_step(step: str, day: str, db_factory, now: datetime) -> dict:
         return await _news_intake(day, db_factory, step)
     if step in {"RISK_SCAN", "AUCTION_MODE", "OPEN_CONFIRM", "CLOSING_RISK", "HARD_RISK"}:
         result = _risk_scan(day, db_factory, asof=now)
+        if step == "OPEN_CONFIRM":
+            with db_factory() as db:
+                truth = _ensure_today_truth(db, day)
+                positions = _positions(truth)
+            with db_factory() as db:
+                context = await collect_market_context(db, trade_date=day, phase="AUCTION",
+                                                       symbols=[p["symbol"] for p in positions], now=now)
+                auction = EvidenceSnapshot(
+                    captured_at=now.astimezone(timezone.utc).replace(tzinfo=None),
+                    source="portfolio_auction_context", logical_hash=logical_hash(context),
+                    payload=context, truth_snapshot_id=truth.id if truth else None,
+                )
+                db.add(auction)
+                db.commit()
+                result["auction_evidence_snapshot_id"] = auction.id
+                result["auction_fresh_holdings"] = sum(
+                    q.get("quality") == "FRESH" for q in context["holdings"])
         red = [p for p in result.get("positions", []) if p.get("color") == "RED"]
         if red and step in {"HARD_RISK", "RISK_SCAN", "OPEN_CONFIRM", "CLOSING_RISK"}:
-            symbols = ",".join(sorted(p["symbol"] for p in red))
-            lines = [f"{p['symbol']} 现价 {p['price']:.2f}，观察价 {float(p['current_stop']):.2f}"
-                     for p in red]
-            result["notification"] = await send_portfolio_notice(
-                key=f"hard-risk:{day}:{symbols}", title=f"A股持仓风险提醒 {day}",
-                content="以下持仓触及停止观察价，请人工核对实时行情及可卖数量；系统未下单。\n" + "\n".join(lines),
-                db_factory=db_factory, timeout_seconds=5)
+            notices = {}
+            for p in red:
+                notices[p["symbol"]] = await send_portfolio_notice(
+                    key=f"hard-risk:{day}:{p['symbol']}:{p['plan_version']}:{p['reason']}",
+                    title=f"风险复核｜{p['symbol']}｜观察价触及",
+                    content=(f"状态：风险告警，未获交易批准，未执行。\n"
+                             f"现价 {p['price']:.2f} 元｜行情时刻 {p['market_data_asof']}｜来源 {p['market_data_source']}。\n"
+                             f"观察价 {float(p['current_stop']):.2f} 元已触及；此价不等于自动止损指令。\n"
+                             f"请人工核对行情、今日可卖数量与现行持仓计划。"),
+                    db_factory=db_factory, timeout_seconds=5,
+                    trade_date=day, symbol=p["symbol"], priority="CRITICAL", reason=p["reason"])
+            result["notifications"] = notices
+            result["notification"] = {"status": "SENT" if any(n["status"] == "SENT" for n in notices.values())
+                                      else "SKIPPED", "count": len(notices)}
         return result
     if step == "FEATURE_REFRESH":
         return await _feature_refresh(day, db_factory, now)
@@ -423,7 +637,23 @@ async def _simple_step(step: str, day: str, db_factory, now: datetime) -> dict:
         if step == "EXCEPTION_REVIEW" and not any(s.status == "POLICY_REJECTED" for s in signals):
             return {"status": "SUCCEEDED", "reason": "NO_POLICY_EXCEPTION", **evidence}
         prompt_id = "deep" if step in {"EXCEPTION_REVIEW", "WEEKLY_REVIEW"} else "review"
-        return await _model_review(day, db_factory, prompt_id, step, evidence)
+        review = await _model_review(day, db_factory, prompt_id, step, evidence)
+        if step == "DAILY_REVIEW":
+            with db_factory() as db:
+                decisions = db.query(PortfolioDecision).filter_by(trade_date=day).all()
+                notifications = db.query(PortfolioNotification).filter_by(trade_date=day).all()
+                truth = _latest_truth(db, day)
+                title, body = render_daily_review(
+                    trade_date=day, decisions=decisions, notifications=notifications,
+                    executions=executions, truth_status=truth.truth_status if truth else "MISSING",
+                    next_day_count=len(next_day),
+                )
+            review["notification"] = await send_portfolio_notice(
+                key=f"daily-review:{day}", title=title, content=body,
+                db_factory=db_factory, timeout_seconds=12,
+                trade_date=day, reason="DAILY_REVIEW",
+            )
+        return review
     if step in {"DEEP_REVIEW", "EVENING_DEEP"}:
         risk = _risk_scan(day, db_factory, asof=now)
         with db_factory() as db:
@@ -588,7 +818,7 @@ def register_jobs(agent_scheduler) -> int:
         count += 1
     ranges = ((9, "30-59", "30,35,40,45,50,55"),
               (10, "*", "*/5"), (11, "0-30", "0,5,10,15,20,25,30"),
-              (13, "*", "*/5"), (14, "0-30", "0,5,10,15,20,25,30"))
+              (13, "*", "*/5"), (14, "*", "*/5"), (15, "0", "0"))
     for hour, minute, feature_minute in ranges:
         for step, spec in (("HARD_RISK", minute), ("FEATURE_REFRESH", feature_minute)):
             scheduler.add_job(run_step, "cron", args=[step], hour=hour, minute=spec,

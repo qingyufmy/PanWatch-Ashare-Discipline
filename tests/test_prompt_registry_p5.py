@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from src.modules.portfolio.prompt_registry import (
     ActionProposal, active_prompt, parse_portfolio_plan, seed_prompts,
+    seed_notification_candidate_prompts,
 )
 from src.platform.persistence.database import Base
 
@@ -22,7 +23,10 @@ def test_seed_is_idempotent_and_hash_tamper_fails_closed():
     db = _db()
     assert seed_prompts(db) == 3
     assert seed_prompts(db) == 0
+    assert seed_notification_candidate_prompts(db) == 3
+    assert seed_notification_candidate_prompts(db) == 0
     row = active_prompt(db, "flash")
+    assert row.version == "1.0.3"
     row.system_template += " unauthorized"
     db.commit()
     with pytest.raises(ValueError, match="prompt_hash_mismatch"):

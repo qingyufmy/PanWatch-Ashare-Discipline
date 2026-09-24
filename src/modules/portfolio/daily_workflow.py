@@ -28,6 +28,7 @@ from src.modules.portfolio.notifications import (
 )
 from src.modules.portfolio.notification_renderer import render_daily_review, render_premarket_plan
 from src.modules.portfolio.decision_router import record_position_decision
+from src.modules.portfolio.risk_observation import record_shadow_risk_observations
 from src.modules.portfolio.model_router import probe_role
 from src.modules.portfolio.market_context import collect_market_context
 from src.modules.portfolio.prompt_registry import run_portfolio_prompt
@@ -89,6 +90,24 @@ def _positions(truth: PortfolioTruthSnapshot | None) -> list[dict]:
 
 def _status(reason: str, **data) -> dict:
     return {"status": "REVIEW", "reason": reason, **data}
+
+
+def _decision_clock(model_run: ModelRun | None, *, observed_at: datetime | None = None) -> datetime:
+    """Use actual post-inference time, never the scheduled slot, for a decision."""
+    if model_run is None or model_run.finished_at is None:
+        raise ValueError("model_finish_missing")
+    finished = model_run.finished_at.replace(tzinfo=timezone.utc)
+    observed = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if finished > observed + timedelta(seconds=1):
+        raise ValueError("model_finish_in_future")
+    return observed
+
+
+def _market_capture_time(market: dict, fallback: datetime) -> datetime:
+    """An evidence row becomes available after collection, not at the schedule slot."""
+    raw = market.get("completed_at")
+    completed = datetime.fromisoformat(raw) if raw else fallback
+    return completed.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _paper_state(db: Session) -> dict | None:
@@ -314,7 +333,8 @@ async def _feature_refresh(day: str, db_factory, now: datetime) -> dict:
             "results": results}
 
 
-async def _premarket_plan(day: str, db_factory, now: datetime | None = None) -> dict:
+async def _premarket_plan(day: str, db_factory, now: datetime | None = None,
+                          decision_clock: Callable[[], datetime] | None = None) -> dict:
     with db_factory() as db:
         truth = _ensure_today_truth(db, day)
         positions = _positions(truth)
@@ -327,7 +347,7 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None) -> 
         paper_state = _paper_state(db)
         limits = _position_limits(db, positions)
         macro = EvidenceSnapshot(
-            captured_at=(now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(tzinfo=None),
+            captured_at=_market_capture_time(market, now or datetime.now(timezone.utc)),
             source="portfolio_market_context", logical_hash=logical_hash(market),
             payload=market, truth_snapshot_id=truth_id,
         )
@@ -354,6 +374,7 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None) -> 
     with db_factory() as db:
         model_run = db.get(ModelRun, model.run_id)
         prompt_version = model_run.prompt_version if model_run else None
+        decision_at = _decision_clock(model_run, observed_at=decision_clock() if decision_clock else None)
         existing = db.query(DailyPortfolioPlan).filter_by(trade_date=day).order_by(DailyPortfolioPlan.version.desc()).first()
         version = (existing.version + 1) if existing else 1
         plan = DailyPortfolioPlan(trade_date=day, version=version, status="REVIEW_ONLY",
@@ -368,6 +389,8 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None) -> 
         signals = []
         for action in proposal.proposals:
             evidence_payload = {"schema_valid": True, "model_conflict": False,
+                                "scheduled_at": now.isoformat() if now else None,
+                                "model_finished_at": model_run.finished_at.isoformat(),
                                 "market_data_source": None, "market_data_asof": None,
                                 "evidence_refs": action.evidence_refs,
                                 "rationale": action.rationale, "confidence": action.confidence,
@@ -379,15 +402,15 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None) -> 
                 db, market=action.market, symbol=action.symbol, action=action.action,
                 source="daily_portfolio_plan", source_agent="portfolio_flash",
                 evidence=evidence_payload, ttl_seconds=3600,
-                generated_at=now,
+                generated_at=decision_at,
                 qty_hint=action.qty_hint, target_weight=action.target_weight,
                 prompt_id="flash", prompt_version=prompt_version, model_role=model.requested_role,
                 requested_model=model.requested_model, reported_model=model.reported_model,
                 commit=False,
             )
             if created:
-                evaluate_signal(db, signal.signal_id, now=now, commit=False)
-                record_position_decision(db, signal, now=now)
+                evaluate_signal(db, signal.signal_id, now=decision_at, commit=False)
+                record_position_decision(db, signal, now=decision_at)
             signal_ids.append(signal.signal_id)
             signals.append(signal)
         title, content = render_premarket_plan(proposal.proposals, signals, positions)
@@ -407,7 +430,8 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None) -> 
     return result
 
 
-async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str) -> dict:
+async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str,
+                               decision_clock: Callable[[], datetime] | None = None) -> dict:
     """Two bounded batch revisions using current market facts; paper fills remain separate."""
     with db_factory() as db:
         truth = _ensure_today_truth(db, day)
@@ -425,7 +449,7 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str) 
         paper_state = _paper_state(db)
         limits = _position_limits(db, positions)
         macro = EvidenceSnapshot(
-            captured_at=now.astimezone(timezone.utc).replace(tzinfo=None),
+            captured_at=_market_capture_time(market, now),
             source="portfolio_market_context", logical_hash=logical_hash(market),
             payload=market, truth_snapshot_id=truth.id,
         )
@@ -436,6 +460,16 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str) 
     if market["risk_tone"] == "UNVERIFIED" or len(fresh) < len(positions):
         return _status("INTRADAY_MARKET_EVIDENCE_UNVERIFIED", macro_evidence_snapshot_id=macro_id,
                        fresh_holding_count=len(fresh), coverage=len(positions))
+    # A risk observation is independent of the model's later action proposal.
+    # Keep its notice decision in Shadow until natural-day review authorizes delivery.
+    with db_factory() as db:
+        shadow_observations = record_shadow_risk_observations(
+            db, trade_date=day, phase=phase, market_context=market,
+            market_evidence_snapshot_id=macro_id,
+            observed_at=decision_clock() if decision_clock else datetime.now(timezone.utc),
+        )
+        shadow_ids = [row.id for row in shadow_observations]
+        db.commit()
     payload = {"trade_date": day, "positions": positions,
                "evidence": {"phase": phase, "truth_snapshot_id": truth.id,
                             "macro_evidence_snapshot_id": macro_id,
@@ -451,15 +485,19 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str) 
                          code=type(exc).__name__, source=phase,
                          title="Intraday portfolio batch failed", context={"detail": str(exc)[:150]})
         return _status("INTRADAY_MODEL_FAILED", error=type(exc).__name__,
-                       macro_evidence_snapshot_id=macro_id)
+                       macro_evidence_snapshot_id=macro_id,
+                       risk_observation_ids=shadow_ids)
     quote_by_symbol = {q.get("symbol"): q for q in market["holdings"]}
     signal_ids = []
     with db_factory() as db:
         model_run = db.get(ModelRun, model.run_id)
         prompt_version = model_run.prompt_version if model_run else None
+        decision_at = _decision_clock(model_run, observed_at=decision_clock() if decision_clock else None)
         for action in proposal.proposals:
             quote = quote_by_symbol.get(action.symbol) or {}
             frozen = {"schema_valid": True, "model_conflict": False,
+                      "scheduled_at": now.isoformat(),
+                      "model_finished_at": model_run.finished_at.isoformat(),
                       "market_data_source": quote.get("source"),
                       "market_data_asof": quote.get("source_asof"),
                       "evidence_refs": action.evidence_refs, "rationale": action.rationale,
@@ -471,7 +509,7 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str) 
             signal, created = record_signal(
                 db, market=action.market, symbol=action.symbol, action=action.action,
                 source="intraday_portfolio_plan", source_agent="portfolio_intraday",
-                evidence=frozen, ttl_seconds=1200, generated_at=now,
+                evidence=frozen, ttl_seconds=1200, generated_at=decision_at,
                 qty_hint=action.qty_hint, target_weight=action.target_weight,
                 prompt_id="review", prompt_version=prompt_version,
                 model_role=model.requested_role,
@@ -479,13 +517,14 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str) 
                 commit=False,
             )
             if created:
-                evaluate_signal(db, signal.signal_id, now=now, commit=False)
-                record_position_decision(db, signal, now=now, queue_notification=False)
+                evaluate_signal(db, signal.signal_id, now=decision_at, commit=False)
+                record_position_decision(db, signal, now=decision_at, queue_notification=False)
             signal_ids.append(signal.signal_id)
         db.commit()
     return {"status": "REVIEW", "reason": "PAPER_ONLY_SIGNALS_REQUIRE_LIVE_FILL_GATE",
             "model_run_id": model.run_id, "macro_evidence_snapshot_id": macro_id,
             "signal_ids": signal_ids, "coverage": len(signal_ids),
+            "risk_observation_ids": shadow_ids,
             "portfolio_rationale": proposal.portfolio_rationale}
 
 

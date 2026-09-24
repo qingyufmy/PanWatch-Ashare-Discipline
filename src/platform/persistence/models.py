@@ -1826,6 +1826,31 @@ class PortfolioNotification(Base):
     expires_at = Column(DateTime, nullable=True)
 
 
+class PortfolioRiskObservation(Base):
+    """Advisory risk fact, independent from trade approval and execution."""
+
+    __tablename__ = "portfolio_risk_observations"
+    __table_args__ = (
+        UniqueConstraint("episode_key", name="uq_portfolio_risk_episode"),
+        Index("ix_portfolio_risk_day_symbol", "trade_date", "symbol", "observed_at"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    episode_key = Column(String(255), nullable=False)
+    trade_date = Column(String(10), nullable=False)
+    symbol = Column(String(32), nullable=False)
+    observation_type = Column(String(48), nullable=False)
+    source_signal_ids = Column(JSON, nullable=False, default=list)
+    market_evidence_snapshot_id = Column(Integer, ForeignKey("evidence_snapshots.id"), nullable=False)
+    data_quality = Column(String(64), nullable=False)
+    execution_readiness = Column(String(32), nullable=False)
+    notice_outcome = Column(String(32), nullable=False)
+    notice_reason = Column(String(80), nullable=False)
+    notification_id = Column(String(64), ForeignKey("portfolio_notifications.id"), nullable=True)
+    observed_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+
+
 class SecurityRule(Base):
     """Verified per-security tick and share step; no guessed market-wide fallback."""
 

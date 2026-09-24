@@ -1,0 +1,18 @@
+{
+  "trade_date": "2026-09-24",
+  "basis": "frozen local model_runs, Beijing trading-day window; historical observation only, no new paid calls",
+  "run_count": 7,
+  "requested_role": "FAST",
+  "profile_role": "FAST",
+  "requested_model": "deepseek-v4-pro",
+  "schema_success": 6,
+  "fallback_used": 0,
+  "latency_ms_sorted": [2719, 21297, 33358, 51125, 58390, 67265, 91655],
+  "p95_nearest_rank_ms": 91655,
+  "within_20_seconds": 1,
+  "within_20_seconds_excluding_probe": 0,
+  "deep_run_count": 0,
+  "fast_and_deep_distinct_profile_verified": false,
+  "candidate_20_second_slo": "FAIL",
+  "new_provider_capability_test": "NOT_RUN"
+}

@@ -1,7 +1,7 @@
 """P7 simulated trading day, idempotency and missed-slot recovery."""
 
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
@@ -15,7 +15,7 @@ from src.modules.portfolio.model_router import ModelResult
 from src.modules.portfolio.prompt_registry import PortfolioActionPlan
 from src.platform.persistence.database import Base
 from src.platform.persistence.models import (
-    DailyPortfolioPlan, PortfolioTruthPosition, PortfolioTruthSnapshot,
+    DailyPortfolioPlan, ModelRun, PortfolioTruthPosition, PortfolioTruthSnapshot,
     PortfolioWorkflowRun, SignalEvent, SystemIssue,
 )
 
@@ -134,15 +134,26 @@ def test_batch_plan_creates_eleven_review_signals_with_daily_plan_link(monkeypat
         result = ModelResult(content=plan.model_dump_json(), run_id="fixture-run", requested_role="FAST",
                              profile_role="FAST", requested_model="fixture-model",
                              reported_model="fixture-model", degraded=False)
+        with factory() as db:
+            db.add(ModelRun(
+                run_id=result.run_id, trace_id="fixture-trace", role="FAST", profile_role="FAST",
+                requested_model="fixture-model", input_hash="fixture-input", latency_ms=30000,
+                status="OK", schema_valid=True, prompt_id="flash", prompt_version="1.0.0",
+                started_at=datetime(2026, 9, 23, 0, 50),
+                finished_at=datetime(2026, 9, 23, 0, 50, 30),
+            ))
+            db.commit()
         return plan, result
 
     monkeypatch.setattr("src.modules.portfolio.daily_workflow.run_portfolio_prompt", fake_prompt)
     result = asyncio.run(_premarket_plan("2026-09-23", factory,
-                                         datetime(2026, 9, 23, 8, 50, tzinfo=SH)))
+                                         datetime(2026, 9, 23, 8, 50, tzinfo=SH),
+                                         decision_clock=lambda: datetime(2026, 9, 23, 0, 51, tzinfo=timezone.utc)))
     assert result["status"] == "REVIEW" and result["coverage"] == 11
     with factory() as db:
         assert db.query(DailyPortfolioPlan).count() == 1
         signals = db.query(SignalEvent).all()
         assert len(signals) == 11
         assert all(s.daily_plan_version == 1 and s.status == "REVIEW_REQUIRED" for s in signals)
+        assert all(s.generated_at >= datetime(2026, 9, 23, 0, 50, 30) for s in signals)
     engine.dispose()

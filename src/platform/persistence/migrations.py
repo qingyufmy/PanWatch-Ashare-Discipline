@@ -2304,6 +2304,26 @@ def _m140_paper_portfolio_nav(conn: Connection) -> None:
     """))
 
 
+def _m141_portfolio_risk_observations(conn: Connection) -> None:
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS portfolio_risk_observations (
+            id TEXT PRIMARY KEY, episode_key TEXT NOT NULL UNIQUE,
+            trade_date TEXT NOT NULL, symbol TEXT NOT NULL,
+            observation_type TEXT NOT NULL, source_signal_ids JSON NOT NULL,
+            market_evidence_snapshot_id INTEGER NOT NULL,
+            data_quality TEXT NOT NULL, execution_readiness TEXT NOT NULL,
+            notice_outcome TEXT NOT NULL, notice_reason TEXT NOT NULL,
+            notification_id TEXT, observed_at DATETIME NOT NULL,
+            expires_at DATETIME NOT NULL,
+            FOREIGN KEY(market_evidence_snapshot_id) REFERENCES evidence_snapshots(id),
+            FOREIGN KEY(notification_id) REFERENCES portfolio_notifications(id)
+        )
+    """))
+    _create_index_if_missing(conn, "ix_portfolio_risk_day_symbol",
+                            "CREATE INDEX ix_portfolio_risk_day_symbol "
+                            "ON portfolio_risk_observations(trade_date, symbol, observed_at)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(101, "agent_config_kind_and_visibility", _m101_agent_config_kind),
     Migration(102, "backfill_agent_kind_data", _m102_backfill_agent_kind),
@@ -2345,6 +2365,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(138, "security_rules", _m138_security_rules),
     Migration(139, "portfolio_paper_fills", _m139_portfolio_paper_fills),
     Migration(140, "paper_portfolio_nav", _m140_paper_portfolio_nav),
+    Migration(141, "portfolio_risk_observations", _m141_portfolio_risk_observations),
 )
 
 

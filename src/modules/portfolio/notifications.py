@@ -14,7 +14,7 @@ from src.platform.persistence.models import NotifyChannel, PortfolioDecision, Po
 
 SH = ZoneInfo("Asia/Shanghai")
 TEMPLATE_VERSION = "portfolio-text-v2-candidate"
-TERMINAL = {"SENT_ACCEPTED", "DELIVERY_UNKNOWN", "CANCELLED", "EXPIRED"}
+TERMINAL = {"SENT_ACCEPTED", "DELIVERY_UNKNOWN", "CANCELLED", "EXPIRED", "SUPPRESSED"}
 
 
 def _now() -> datetime:

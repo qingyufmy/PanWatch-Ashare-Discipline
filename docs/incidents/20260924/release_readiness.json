@@ -1,0 +1,35 @@
+{
+  "trade_date": "2026-09-24",
+  "scope": "Sep24 incident repair candidate",
+  "local_shadow_deployment": {
+    "started_at_beijing": "2026-09-24T16:59:07+08:00",
+    "schema_version": 141,
+    "health_http_status": 200,
+    "unauthenticated_risk_observation_http_status": 401,
+    "natural_market_session_observed": false
+  },
+  "advisory": {
+    "code_status": "SHADOW_CANDIDATE",
+    "offline_regression": "PASS",
+    "natural_day_shadow": "UNPROVEN",
+    "lark_delivery": "DISABLED_FOR_CANDIDATE",
+    "technical_level_lineage": "UNPROVEN",
+    "ready_for_user_facing_activation": false
+  },
+  "paper": {
+    "code_status": "EXISTING_PAPER_ONLY_GATE_UNCHANGED",
+    "new_directional_fills": 0,
+    "natural_day_validation": "UNPROVEN",
+    "ready_for_unattended_execution": false
+  },
+  "live": {
+    "broker_order_connection": false,
+    "broker_reconciled_holding": false,
+    "broker_reconciled_execution_samples": 0,
+    "p10_gate": "FAIL_CLOSED",
+    "ready": false
+  },
+  "historical_reconciliation": null,
+  "missing_frozen_forward_price_path": true,
+  "approved_for_main_merge": false
+}

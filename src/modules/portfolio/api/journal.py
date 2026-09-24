@@ -12,6 +12,7 @@ from src.platform.persistence.database import SessionLocal, get_db
 from src.platform.persistence.models import (
     ActionableSignal, DisciplineEvent, ExecutionEvent, NextDayAction,
     SignalEvent, SignalLifecycleEvent, SignalPolicyDecision, PortfolioNotification,
+    PortfolioRiskObservation,
 )
 
 
@@ -74,6 +75,28 @@ def list_signals(limit: int = 50, db: Session = Depends(get_db)):
             .order_by(SignalEvent.generated_at.desc())
             .limit(min(max(limit, 1), 200)).all())
     return [_signal(row) for row in rows]
+
+
+@router.get("/risk-observations")
+def list_risk_observations(trade_date: str | None = None, limit: int = 50,
+                           db: Session = Depends(get_db)):
+    """Authenticated Shadow ledger; observations never grant trade approval."""
+    query = db.query(PortfolioRiskObservation)
+    if trade_date:
+        query = query.filter_by(trade_date=trade_date)
+    rows = query.order_by(PortfolioRiskObservation.observed_at.desc()).limit(min(max(limit, 1), 200)).all()
+    return [{
+        "id": row.id, "trade_date": row.trade_date, "symbol": row.symbol,
+        "observation_type": row.observation_type,
+        "source_signal_ids": row.source_signal_ids,
+        "market_evidence_snapshot_id": row.market_evidence_snapshot_id,
+        "data_quality": row.data_quality,
+        "execution_readiness": row.execution_readiness,
+        "notice_outcome": row.notice_outcome,
+        "notice_reason": row.notice_reason,
+        "notification_id": row.notification_id,
+        "observed_at": row.observed_at, "expires_at": row.expires_at,
+    } for row in rows]
 
 
 @router.get("/signals/{signal_id}")

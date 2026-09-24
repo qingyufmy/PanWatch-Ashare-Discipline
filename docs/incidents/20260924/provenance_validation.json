@@ -1,0 +1,11 @@
+{
+  "trade_date": "2026-09-24",
+  "signal_count": 364,
+  "missing_truth_reference": 0,
+  "missing_evidence_reference": 0,
+  "missing_policy_rows": 0,
+  "recorded_model_id_not_found": 0,
+  "model_id_not_recorded_on_agent_signals": 334,
+  "model_derived_signal_time_before_model_finish": 30,
+  "interpretation": "Missing model reference is not evidence that no model was called. Historical rows remain unchanged."
+}

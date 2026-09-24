@@ -23,6 +23,37 @@ GLOBAL_TECH = {
 }
 
 
+def context_quality_matrix(context: dict) -> dict:
+    """Keep coverage, sample scope and source-time quality separate."""
+    indices = context.get("indices") or []
+    holdings = context.get("holdings") or []
+    tech = context.get("global_tech") or []
+    candidate = context.get("candidate_breadth") or {}
+    trade_date = context.get("trade_date")
+    candidate_date = candidate.get("snapshot_date")
+    return {
+        "indices": {"fresh": sum(q.get("quality") == "FRESH" for q in indices),
+                    "total": len(indices), "scope": "major_indices"},
+        "market_breadth": {"quality": "MISSING", "scope": "whole_market",
+                           "reason": "NO_WHOLE_MARKET_FEED"},
+        "candidate_pool_breadth": {
+            "quality": ("MISSING" if not candidate_date else
+                        "CURRENT_DAY" if candidate_date == trade_date else "STALE"),
+            "scope": "candidate_sample_not_market_wide",
+            "snapshot_date": candidate_date,
+            "sample_size": candidate.get("sample_size"),
+        },
+        "holdings": {"fresh": sum(q.get("quality") == "FRESH" for q in holdings),
+                     "total": len(holdings), "scope": "current_holdings"},
+        "global_tech": {"source_time_verified": sum(bool(q.get("source_asof")) for q in tech),
+                        "total": len(tech),
+                        "fresh": sum(q.get("quality") == "FRESH" for q in tech),
+                        "scope": "selected_global_technology"},
+        "boards": {"quality": "FETCH_TIME_ONLY" if context.get("boards") else "MISSING",
+                   "scope": "hot_board_sample"},
+    }
+
+
 def _quote(row: dict | None, label: str, *, collected_at: datetime, phase: str) -> dict:
     if not row:
         return {"name": label, "quality": "MISSING"}
@@ -94,13 +125,18 @@ async def collect_market_context(
     up = sum((q.get("change_pct") or 0) > 0 for q in indices if q["quality"] == "FRESH")
     risk_tone = ("RISK_ON" if fresh_indices >= 3 and up >= 3 else
                  "RISK_OFF" if fresh_indices >= 3 and up <= 1 else "UNVERIFIED")
-    return {
+    result = {
         "trade_date": trade_date, "phase": phase,
         "collected_at": observed.isoformat(), "quote_error": error,
-        "indices": indices, "candidate_breadth": sample,
+        "completed_at": datetime.now(SH).isoformat(),
+        "indices": indices,
+        "market_breadth": {"quality": "MISSING", "scope": "whole_market"},
+        "candidate_breadth": sample,
         "global_tech": tech, "boards": boards, "holdings": holdings,
         "risk_tone": risk_tone,
         "limits": ["US source timestamps are unavailable; do not claim fresh global resonance.",
                    "Candidate breadth is not whole-market breadth.",
                    "Board rankings have fetch time only; confirm at individual quote time."],
     }
+    result["context_quality"] = context_quality_matrix(result)
+    return result

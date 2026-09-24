@@ -1,0 +1,36 @@
+[
+  {
+    "ack_status": "NOT_OBSERVED",
+    "action_type": "RISK_OR_PLAN",
+    "anonymous_position_key": null,
+    "content_hash": "cd9bc2b3a76a007837e2f70e2cc5c813a18e17436e4656d2872363bdb6e802ba",
+    "decision_revision": null,
+    "delivery_status": "SENT_ACCEPTED",
+    "notification_id": "7c93d216154c44f48f5c717e0f7948e3",
+    "price_evidence_linked": false,
+    "priority": "NORMAL",
+    "provider_accepted_at_utc": "2026-09-24T01:08:21.514312+00:00",
+    "queued_at_utc": "2026-09-24T01:08:15.146735+00:00",
+    "reason_code": "PREMARKET_PLAN",
+    "retry_count": 0,
+    "suppression_reason_code": null,
+    "template_version": "portfolio-text-v2-candidate"
+  },
+  {
+    "ack_status": "NOT_OBSERVED",
+    "action_type": "RISK_OR_PLAN",
+    "anonymous_position_key": null,
+    "content_hash": "21fce956c3eab671e5351ac9120e6d2d15cd458ffe08fcbc00dce7a983c2838c",
+    "decision_revision": null,
+    "delivery_status": "SENT_ACCEPTED",
+    "notification_id": "9e4f65c4a1d9482a8a02189154d6da07",
+    "price_evidence_linked": false,
+    "priority": "NORMAL",
+    "provider_accepted_at_utc": "2026-09-24T07:30:41.033157+00:00",
+    "queued_at_utc": "2026-09-24T07:30:34.844969+00:00",
+    "reason_code": "DAILY_REVIEW",
+    "retry_count": 0,
+    "suppression_reason_code": null,
+    "template_version": "portfolio-text-v2-candidate"
+  }
+]

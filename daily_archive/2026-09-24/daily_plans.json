@@ -1,0 +1,75 @@
+[
+  {
+    "id": 2,
+    "input_hash": "86396f6737594cf5f2ad24a8ae612818d52bfa991d1d6bf91071aa67b30432f1",
+    "model_run_id": "ec51ee99e5b24b8c815035b932971324",
+    "output_hash": "ff06e06e07b02b758739b50195b51db4d6c3a4a41af3a1f9b2e4f11d63ad50c6",
+    "prompt_id": "flash",
+    "prompt_version": "1.0.3",
+    "proposals": [
+      {
+        "action": "HOLD",
+        "confidence": 0.3,
+        "market": "CN",
+        "symbol": "002436"
+      },
+      {
+        "action": "HOLD",
+        "confidence": 0.3,
+        "market": "CN",
+        "symbol": "002487"
+      },
+      {
+        "action": "HOLD",
+        "confidence": 0.3,
+        "market": "CN",
+        "symbol": "300136"
+      },
+      {
+        "action": "HOLD",
+        "confidence": 0.3,
+        "market": "CN",
+        "symbol": "600206"
+      },
+      {
+        "action": "HOLD",
+        "confidence": 0.3,
+        "market": "CN",
+        "symbol": "600367"
+      },
+      {
+        "action": "HOLD",
+        "confidence": 0.3,
+        "market": "CN",
+        "symbol": "600584"
+      },
+      {
+        "action": "HOLD",
+        "confidence": 0.3,
+        "market": "CN",
+        "symbol": "601208"
+      },
+      {
+        "action": "HOLD",
+        "confidence": 0.3,
+        "market": "CN",
+        "symbol": "688146"
+      },
+      {
+        "action": "HOLD",
+        "confidence": 0.3,
+        "market": "CN",
+        "symbol": "688222"
+      },
+      {
+        "action": "HOLD",
+        "confidence": 0.3,
+        "market": "CN",
+        "symbol": "688783"
+      }
+    ],
+    "status": "REVIEW_ONLY",
+    "truth_snapshot_id": 7,
+    "version": 1
+  }
+]

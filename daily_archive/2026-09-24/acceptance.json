@@ -1,0 +1,41 @@
+{
+  "gate": {
+    "checks": {
+      "FAST_P95<20s": false,
+      "HardRisk_P95<30s": true,
+      "critical_scheduler_missed=0": true,
+      "critical_stale_actionable=0": true,
+      "duplicate_actionable=0": true,
+      "eod_reconcile=100%": false,
+      "freshness>=99.5%": false,
+      "policy_bypass=0": true,
+      "schema_success>=99%": false,
+      "stop_widening=0": true,
+      "traceability=100%": false
+    },
+    "passed": false,
+    "status": "FAIL_CLOSED"
+  },
+  "metrics": {
+    "critical_scheduler_missed": 0,
+    "critical_stale_actionable": 0,
+    "duplicate_actionable": 0,
+    "eod_reconcile": null,
+    "eod_run_count": 0,
+    "fast_p95_seconds": 91.655,
+    "freshness": 0.9917355371900827,
+    "hard_risk_p95_seconds": 0.461094,
+    "policy_bypass": 0,
+    "sample_counts": {
+      "actionable": 32,
+      "executions": 0,
+      "fixed_runs": 16,
+      "model_runs": 7,
+      "risk_positions": 2420,
+      "risk_runs": 242
+    },
+    "schema_success": 0.8571428571428571,
+    "stop_widening": 0,
+    "traceability": 0.625
+  }
+}

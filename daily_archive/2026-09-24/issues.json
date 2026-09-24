@@ -1,0 +1,26 @@
+[
+  {
+    "category": "DATA_STALE",
+    "issue_id": "c9d6995c7ba842eebbbc4602c9dd96ba",
+    "occurrence_count": 123,
+    "severity": "ERROR",
+    "status": "OPEN",
+    "title": "Minute data stale or incomplete"
+  },
+  {
+    "category": "MODEL_SCHEMA_ERROR",
+    "issue_id": "7d295b95eed348b3b7e8cbc3de29dd96",
+    "occurrence_count": 1,
+    "severity": "ERROR",
+    "status": "FIXED",
+    "title": "Portfolio batch proposal failed"
+  },
+  {
+    "category": "DATA_MISSING",
+    "issue_id": "3844b8139bf247b78c547b4a3b234eea",
+    "occurrence_count": 10,
+    "severity": "ERROR",
+    "status": "OPEN",
+    "title": "Minute bars unavailable"
+  }
+]

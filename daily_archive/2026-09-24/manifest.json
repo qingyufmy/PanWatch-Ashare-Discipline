@@ -1,0 +1,38 @@
+{
+  "acceptance_gate": "FAIL_CLOSED",
+  "account_data": "EXCLUDED: account IDs, cash, NAV, position quantity, cost, and market value",
+  "after_close_steps_present": true,
+  "analysis_steps": 5,
+  "counts": {
+    "actionable_signals": 32,
+    "daily_plans": 1,
+    "issues": 3,
+    "minute_symbols": 10,
+    "model_runs": 7,
+    "policy_decisions": 4732,
+    "signals": 364,
+    "truth_snapshots": 2,
+    "workflow_runs": 308
+  },
+  "daily_review_complete": true,
+  "generated_at_utc": "2026-09-24T07:52:04.482889+00:00",
+  "missing_close_steps": [],
+  "notification_summary": {
+    "broker_reconciled_executions": 0,
+    "count": 2,
+    "delivery_statuses": {
+      "SENT_ACCEPTED": 2
+    },
+    "user_reported_executions": 0
+  },
+  "paper_fill_count": 0,
+  "paper_nav_status": "CAPTURED",
+  "publication_scope": "PUBLIC_ALLOWLISTED_SUMMARY",
+  "run_statuses": {
+    "REVIEW": 19,
+    "SUCCEEDED": 289
+  },
+  "secret_data": "EXCLUDED: database, credentials, webhook URLs, and model response text",
+  "source_revision": "ac48c4d9d4dabe449ffae09d9424c5525567de8a",
+  "trade_date": "2026-09-24"
+}

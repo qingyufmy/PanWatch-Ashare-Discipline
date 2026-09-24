@@ -1,0 +1,23 @@
+[
+  {
+    "agent_name": "daily_report",
+    "failed_count": 0,
+    "notifications_sent_count": 1,
+    "run_count": 1,
+    "success_count": 1
+  },
+  {
+    "agent_name": "intraday_monitor",
+    "failed_count": 1,
+    "notifications_sent_count": 0,
+    "run_count": 83,
+    "success_count": 82
+  },
+  {
+    "agent_name": "premarket_outlook",
+    "failed_count": 0,
+    "notifications_sent_count": 1,
+    "run_count": 1,
+    "success_count": 1
+  }
+]

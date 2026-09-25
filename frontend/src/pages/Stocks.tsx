@@ -421,6 +421,7 @@ export default function StocksPage() {
   const [poolSuggestionsLoading, setPoolSuggestionsLoading] = useState(false)
   const [portfolioAdvice, setPortfolioAdvice] = useState<Record<string, PortfolioAdvice>>({})
   const [portfolioAdviceUnavailable, setPortfolioAdviceUnavailable] = useState(false)
+  const [portfolioMarketStatus, setPortfolioMarketStatus] = useState('TRADING_DAY')
   const [priceAlertSummaryMap, setPriceAlertSummaryMap] = useState<Record<string, { total: number; enabled: number }>>({})
 
   // News Dialog
@@ -701,8 +702,9 @@ export default function StocksPage() {
 
   const loadPortfolioAdvice = useCallback(async () => {
     try {
-      const data = await fetchAPI<{ trade_date: string; items: Record<string, PortfolioAdvice> }>('/portfolio-workflow/advice')
+      const data = await fetchAPI<{ trade_date: string; market_status: string; items: Record<string, PortfolioAdvice> }>('/portfolio-workflow/advice')
       setPortfolioAdvice(data.items)
+      setPortfolioMarketStatus(data.market_status)
       setPortfolioAdviceUnavailable(false)
     } catch {
       setPortfolioAdviceUnavailable(true)
@@ -2100,7 +2102,7 @@ export default function StocksPage() {
                                       {pos.name}
                                     </button>
                                     {(() => {
-                                      if (pos.market === 'CN') return <span className="ml-2"><PortfolioAdviceBadge advice={portfolioAdvice[pos.symbol] || null} stockName={pos.name} symbol={pos.symbol} unavailable={portfolioAdviceUnavailable} /></span>
+                                      if (pos.market === 'CN') return <span className="ml-2"><PortfolioAdviceBadge advice={portfolioAdvice[pos.symbol] || null} stockName={pos.name} symbol={pos.symbol} unavailable={portfolioAdviceUnavailable} marketStatus={portfolioMarketStatus} /></span>
                                       const { suggestion, kline } = getSuggestionForStock(pos.symbol, pos.market, true)
                                       return (suggestion || kline) ? (
                                         <span className="ml-2">
@@ -2287,7 +2289,7 @@ export default function StocksPage() {
                               </div>
                               {/* Row 2 (Suggestion badge, dedicated row to avoid wrapping mess) */}
                               {(() => {
-                                if (pos.market === 'CN') return <div className="mb-2"><PortfolioAdviceBadge advice={portfolioAdvice[pos.symbol] || null} stockName={pos.name} symbol={pos.symbol} unavailable={portfolioAdviceUnavailable} /></div>
+                                if (pos.market === 'CN') return <div className="mb-2"><PortfolioAdviceBadge advice={portfolioAdvice[pos.symbol] || null} stockName={pos.name} symbol={pos.symbol} unavailable={portfolioAdviceUnavailable} marketStatus={portfolioMarketStatus} /></div>
                                 const { suggestion, kline } = getSuggestionForStock(pos.symbol, pos.market, true)
                                 return (suggestion || kline) ? (
                                   <div className="mb-2">

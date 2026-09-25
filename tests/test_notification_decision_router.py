@@ -127,3 +127,33 @@ def test_renderer_rejects_wrong_symbol_and_does_not_guess_quantity_or_model_pric
     assert title.startswith("减仓")
     assert "未授权具体股数" in body
     assert "300股" not in body and "nan" not in body.lower()
+
+
+def test_decision_rejects_prior_day_truth_for_new_day_signal():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    prior = datetime(2026, 9, 24, 7, 0, tzinfo=timezone.utc)
+    with factory() as db:
+        truth = PortfolioTruthSnapshot(
+            trade_date="2026-09-24", phase="EOD", source="user_attested",
+            fetched_at=prior.replace(tzinfo=None), source_asof=prior.replace(tzinfo=None),
+            freshness="FRESH", truth_status="REVIEW_ONLY", logical_hash="prior",
+            anomaly_flags=[], account_details=[],
+        )
+        db.add(truth)
+        db.flush()
+        db.add(PortfolioTruthPosition(snapshot_id=truth.id, market="CN", symbol="600001",
+                                      name="样例", total_qty=100, sellable_qty=100,
+                                      today_locked_qty=0, avg_cost=10, account_details=[]))
+        signal, _ = record_signal(
+            db, market="CN", symbol="600001", action="HOLD", source="fixture",
+            evidence={"schema_valid": True}, ttl_seconds=3600,
+            generated_at=prior + timedelta(days=1), commit=False,
+        )
+        signal.status = "REVIEW_REQUIRED"
+        db.flush()
+        assert signal.trade_date == "2026-09-25"
+        assert record_position_decision(db, signal, now=prior + timedelta(days=1, seconds=1)) == (None, None)
+        assert db.query(PortfolioDecision).count() == 0
+    engine.dispose()

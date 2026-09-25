@@ -6,13 +6,27 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+import pytest
 
+from src.modules.portfolio.api import workflow
 from src.modules.portfolio.api.workflow import current_advice, decisions
 from src.platform.persistence.database import Base
 from src.platform.persistence.models import (
     EvidenceSnapshot, PortfolioDecision, PortfolioNotification,
     PortfolioRiskObservation, PortfolioWorkflowRun,
 )
+
+
+@pytest.fixture(autouse=True)
+def confirmed_session(monkeypatch):
+    monkeypatch.setattr(workflow, "confirmed_cn_trading_day", lambda _day: True)
+
+
+def test_closed_day_suppresses_current_advice_without_changing_history(monkeypatch):
+    monkeypatch.setattr(workflow, "confirmed_cn_trading_day", lambda _day: False)
+    response = current_advice(db=None)
+    assert response["market_status"] == "NON_TRADING_DAY"
+    assert response["items"] == {}
 
 
 def test_advice_expiry_risk_priority_and_symbol_history():

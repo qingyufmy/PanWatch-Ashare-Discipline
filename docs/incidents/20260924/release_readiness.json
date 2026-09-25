@@ -10,6 +10,16 @@
     "unauthenticated_risk_observation_http_status": 401,
     "natural_market_session_observed": false
   },
+  "next_day_audit": {
+    "date": "2026-09-25",
+    "exchange_status": "CLOSED_MID_AUTUMN",
+    "portfolio_workflow": "303_SKIPPED_NON_TRADING_DAY_AS_OF_1557",
+    "shadow_natural_market_validation": "NOT_POSSIBLE_ON_EXCHANGE_HOLIDAY",
+    "legacy_daily_report_holiday_message": 1,
+    "repair": "LOCAL_SHADOW_DEPLOYED_0b834dd_AT_1607",
+    "repair_validation": "101_TESTS_PASS_FRONTEND_BUILD_PASS_ADVICE_HTTP_200_NON_TRADING_DAY_EMPTY",
+    "next_confirmed_session": "2026-09-28"
+  },
   "advisory": {
     "code_status": "SHADOW_CANDIDATE",
     "offline_regression": "PASS",

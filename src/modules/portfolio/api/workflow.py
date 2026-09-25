@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from src.modules.portfolio.daily_workflow import FIXED_STEPS
+from src.platform.scheduling.trading_calendar import confirmed_cn_trading_day
 from src.platform.persistence.database import get_db
 from src.platform.persistence.models import (
     DailyPortfolioPlan, EvidenceSnapshot, PortfolioDecision, PortfolioNotification,
@@ -109,6 +110,10 @@ def current_advice(db: Session = Depends(get_db)):
     """One current display state per symbol; unverified decisions are not advice."""
     now = datetime.now(timezone.utc)
     day = now.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    session = confirmed_cn_trading_day(now.astimezone(ZoneInfo("Asia/Shanghai")).date())
+    if session is not True:
+        return {"trade_date": day, "market_status": ("NON_TRADING_DAY" if session is False
+                                                       else "CALENDAR_UNVERIFIED"), "items": {}}
     rows = (db.query(PortfolioDecision).filter_by(trade_date=day, current=True)
             .order_by(PortfolioDecision.id.asc()).all())
     result = {row.symbol: {
@@ -155,4 +160,4 @@ def current_advice(db: Session = Depends(get_db)):
                     "expires_at": _utc_iso(risk.finished_at + timedelta(seconds=180)),
                     "source": "hard_risk", "reason": "观察价触及，请人工核对行情与持仓计划",
                 }
-    return {"trade_date": day, "items": result}
+    return {"trade_date": day, "market_status": "TRADING_DAY", "items": result}

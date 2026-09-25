@@ -32,6 +32,8 @@ def record_position_decision(db: Session, signal: SignalEvent, *,
     if signal.expires_at <= timestamp or signal.generated_at > timestamp:
         return None, None
     truth = db.get(PortfolioTruthSnapshot, signal.truth_snapshot_id) if signal.truth_snapshot_id else None
+    if truth is None or truth.trade_date != signal.trade_date:
+        return None, None
     bare_symbol = signal.symbol[-6:] if len(signal.symbol) == 8 else signal.symbol
     position = next((p for p in truth.positions if p.market == signal.market and p.symbol == bare_symbol), None) if truth else None
     if position is None:

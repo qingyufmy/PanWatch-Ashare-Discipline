@@ -7,10 +7,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from src.modules.portfolio.signal_journal import record_manual_execution, reconcile_execution, transition_signal
-from src.platform.persistence.database import get_db
+from src.modules.portfolio.notifications import dispatch_portfolio_notice
+from src.platform.persistence.database import SessionLocal, get_db
 from src.platform.persistence.models import (
     ActionableSignal, DisciplineEvent, ExecutionEvent, NextDayAction,
-    SignalEvent, SignalLifecycleEvent, SignalPolicyDecision,
+    SignalEvent, SignalLifecycleEvent, SignalPolicyDecision, PortfolioNotification,
+    PortfolioRiskObservation,
 )
 
 
@@ -27,6 +29,7 @@ class ManualExecutionRequest(BaseModel):
     actual_price: float | None = Field(default=None, gt=0)
     executed_at: datetime
     notes: str = ""
+    client_request_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class ReconcileRequest(BaseModel):
@@ -74,6 +77,29 @@ def list_signals(limit: int = 50, db: Session = Depends(get_db)):
     return [_signal(row) for row in rows]
 
 
+@router.get("/risk-observations")
+def list_risk_observations(trade_date: str | None = None, limit: int = 50,
+                           db: Session = Depends(get_db)):
+    """Authenticated Shadow ledger; observations never grant trade approval."""
+    query = db.query(PortfolioRiskObservation)
+    if trade_date:
+        query = query.filter_by(trade_date=trade_date)
+    rows = query.order_by(PortfolioRiskObservation.observed_at.desc()).limit(min(max(limit, 1), 200)).all()
+    return [{
+        "id": row.id, "trade_date": row.trade_date, "symbol": row.symbol,
+        "observation_type": row.observation_type, "severity": row.severity,
+        "source_signal_ids": row.source_signal_ids,
+        "market_evidence_snapshot_id": row.market_evidence_snapshot_id,
+        "level_snapshot_id": row.level_snapshot_id,
+        "data_quality": row.data_quality,
+        "execution_readiness": row.execution_readiness,
+        "notice_outcome": row.notice_outcome,
+        "notice_reason": row.notice_reason,
+        "notification_id": row.notification_id,
+        "observed_at": row.observed_at, "expires_at": row.expires_at,
+    } for row in rows]
+
+
 @router.get("/signals/{signal_id}")
 def get_signal(signal_id: str, db: Session = Depends(get_db)):
     row = db.get(SignalEvent, signal_id)
@@ -117,15 +143,19 @@ def ignore_signal(signal_id: str, body: IgnoreRequest, db: Session = Depends(get
 
 
 @router.post("/signals/{signal_id}/executions")
-def create_manual_execution(signal_id: str, body: ManualExecutionRequest, db: Session = Depends(get_db)):
+async def create_manual_execution(signal_id: str, body: ManualExecutionRequest, db: Session = Depends(get_db)):
     try:
         row = record_manual_execution(
             db, signal_id=signal_id, actual_action=body.actual_action,
             actual_qty=body.actual_qty, actual_price=body.actual_price,
             executed_at=body.executed_at, notes=body.notes,
+            client_request_id=body.client_request_id,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    notice = db.query(PortfolioNotification).filter_by(semantic_key=f"execution:{row.execution_id}").first()
+    if notice and notice.delivery_status == "PENDING":
+        await dispatch_portfolio_notice(notice.id, db_factory=SessionLocal)
     return _execution(row)
 
 

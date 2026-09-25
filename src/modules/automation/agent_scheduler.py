@@ -1,6 +1,8 @@
 import logging
 import time
+from datetime import datetime
 from typing import Callable, Awaitable
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -11,8 +13,10 @@ from src.platform.observability.log_context import log_context
 from src.platform.observability import otel
 from src.platform.marketdata.models import MARKETS
 from src.platform.scheduling.schedule_parser import parse_schedule
+from src.platform.scheduling.trading_calendar import confirmed_cn_trading_day
 
 logger = logging.getLogger(__name__)
+CN_CLOSE_OR_PREMARKET_AGENTS = frozenset({"daily_report", "premarket_outlook"})
 
 
 class AgentScheduler:
@@ -72,6 +76,16 @@ class AgentScheduler:
         if not agent:
             logger.error(f"Agent 未找到: {agent_name}")
             return
+
+        if agent_name in CN_CLOSE_OR_PREMARKET_AGENTS:
+            day = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+            session = confirmed_cn_trading_day(day)
+            if session is not True:
+                reason = "NON_TRADING_DAY" if session is False else "CALENDAR_UNVERIFIED"
+                logger.info("[调度] 跳过 %s：%s (%s)", agent.display_name, reason, day)
+                record_agent_run(agent_name=agent_name, status="skipped",
+                                 result=reason, trigger_source="schedule")
+                return
 
         start = time.monotonic()
         trace_id = f"sch-{agent_name}-{int(time.time() * 1000)}"

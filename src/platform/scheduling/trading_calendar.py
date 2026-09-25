@@ -147,6 +147,15 @@ def is_trading_day(market, d: date | datetime | None = None) -> bool:
     return True
 
 
+def confirmed_cn_trading_day(d: date) -> bool | None:
+    """Return a calendar-backed CN answer; unknown coverage never means open."""
+    if _CN_TRADING_DATES is None or _CN_RANGE is None:
+        return None
+    if not _CN_RANGE[0] <= d <= _CN_RANGE[1]:
+        return None
+    return d in _CN_TRADING_DATES
+
+
 def next_confirmed_cn_trading_day(d: date) -> date | None:
     """Return the next A-share session only when the loaded calendar proves it."""
     if not _CN_TRADING_DATES or not _CN_RANGE or d >= _CN_RANGE[1]:

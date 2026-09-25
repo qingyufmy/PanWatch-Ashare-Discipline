@@ -1,0 +1,21 @@
+{
+  "trade_date": "2026-09-24",
+  "basis": "frozen SQLite evidence_snapshots 540, 552, 609, 753; source quality as recorded, not independently exchange verified",
+  "whole_market_breadth": {"quality": "MISSING", "reason": "no whole-market breadth feed in these four contexts"},
+  "candidate_context_contract": {
+    "holding_breadth": "fresh current holdings only, never market-wide",
+    "industry_exposure": "MISSING until a verified sector mapping exists",
+    "candidate_pool_breadth": "separate sampled universe",
+    "global_tech": "source time must be present for fresh classification"
+  },
+  "premarket": {"snapshots": 2, "index_quality": "PREVIOUS_CLOSE", "fresh_holding_quotes": 0,
+    "candidate_pool": {"snapshot_date": "2026-09-23", "sample_size": 26, "quality": "STALE"},
+    "global_tech": "SOURCE_TIME_UNKNOWN"},
+  "morning_1000": {"snapshot_id": 609, "risk_tone": "RISK_OFF", "fresh_indices": 4,
+    "fresh_holding_quotes": 10, "candidate_pool": {"snapshot_date": "2026-09-23", "sample_size": 26, "quality": "STALE"},
+    "global_tech": "SOURCE_TIME_UNKNOWN", "boards": "FETCH_TIME_ONLY"},
+  "afternoon_1330": {"snapshot_id": 753, "risk_tone": "RISK_OFF", "fresh_indices": 4,
+    "fresh_holding_quotes": 10, "candidate_pool": {"snapshot_date": "2026-09-24", "sample_size": 91,
+      "breadth_up_pct": 89.011, "scope": "candidate_sample_not_market_wide"},
+    "global_tech": "SOURCE_TIME_UNKNOWN", "boards": "MISSING"}
+}

@@ -1,0 +1,21 @@
+{
+  "trade_date": "2026-09-24",
+  "scope": "EX_POST_PRICE_PATH_ONLY",
+  "episode_count": 34,
+  "with_subsequent_closed_bar": 25,
+  "with_15_subsequent_trading_bars": 23,
+  "with_30_subsequent_trading_bars": 22,
+  "with_60_subsequent_trading_bars": 21,
+  "post_close_episodes_without_future_bar": 9,
+  "archive_source": "sina",
+  "archive_fetched_after_event_count": 25,
+  "latest_archive_bar_beijing": "14:57",
+  "official_1500_close_covered": false,
+  "event_input_price_verified": false,
+  "execution_eligibility_verified": false,
+  "broker_reconciled_executions": null,
+  "fees_slippage_and_trading_pnl": null,
+  "private_outcome_csv_records": 34,
+  "private_outcome_csv_sha256": "3e591ecf17c15a52cd947167689039b3bfffc97c3584dd6a78de98cc6e9ee07e",
+  "interpretation": "Ex-post bar changes and excursions are research outcomes, not advice, fills, alpha, or proven avoidable loss"
+}

@@ -21,6 +21,15 @@ export interface PaperTradingAccountResponse {
   allocation_ratio?: number
   created_at: string
   updated_at: string
+  paper_mode?: 'PAPER_ONLY'
+  realized_pnl?: number
+  baseline?: {
+    trade_date: string
+    nav_source: string
+    synthetic_cash: number
+    quote_source: string
+    truth_snapshot_id: number
+  } | null
 }
 
 export type MarketView = 'ALL' | 'CN' | 'HK' | 'US'
@@ -32,6 +41,7 @@ export interface PaperTradingPositionItem {
   stock_name: string
   quantity: number
   entry_price: number
+  source_cost_price?: number | null
   stop_loss?: number | null
   target_price?: number | null
   current_price?: number | null
@@ -46,6 +56,20 @@ export interface PaperTradingPositionItem {
   opened_at: string
   closed_at: string
   updated_at: string
+}
+
+export interface PaperPortfolioFillItem {
+  signal_id: string
+  trade_date: string
+  symbol: string
+  action: string
+  quantity: number
+  price: number
+  fees: number
+  cash_delta: number
+  quote_asof: string
+  filled_at: string
+  policy_scope: 'PAPER_ONLY'
 }
 
 export interface PaperTradingTradeItem {
@@ -115,6 +139,7 @@ export interface PaperTradingNotifySettings {
 }
 
 export const paperTradingApi = {
+  listPortfolioFills: () => fetchAPI<PaperPortfolioFillItem[]>('/paper-trading/portfolio-fills'),
   getAccount: (market?: string) =>
     fetchAPI<PaperTradingAccountResponse>(
       `/paper-trading/account${market && market !== 'ALL' ? `?market=${encodeURIComponent(market)}` : ''}`

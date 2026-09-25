@@ -1,0 +1,43 @@
+{
+  "trade_date": "2026-09-23",
+  "scope": "2026-09-23旧版本自然日基线与新版本隔离合成回放；非新版本真实自然日",
+  "baseline_source": "本机旧版SQLite只读抽样与当日公开manifest；详见docs/diagnostics/notification_baseline_2026-09-23.md",
+  "baseline_observed": {
+    "workflow_runs": 267,
+    "signals": 539,
+    "policy_rule_decisions": 5929,
+    "actionable_signals": 0,
+    "minute_symbols": 11,
+    "hard_risk_missed_slots": 3,
+    "feature_refresh_succeeded_slots": 28,
+    "feature_refresh_review_slots": 15,
+    "eod_truth_status": "REVIEW_ONLY",
+    "p10_gate": "FAIL_CLOSED",
+    "actual_lark_message_count": null,
+    "actual_duplicate_rate": null,
+    "actual_conflict_rate": null,
+    "actual_unverified_price_rate": null,
+    "actual_delivery_unknown_count": null,
+    "actual_user_read_count": null,
+    "broker_verified_execution_count": null
+  },
+  "candidate_synthetic_replay": {
+    "five_supplied_cases": "PASS",
+    "quiet_20_holdings_model_calls": 0,
+    "one_changed_holding_batch_model_calls": 1,
+    "model_calls_external": 0,
+    "real_lark_calls": 0,
+    "real_orders": 0,
+    "outbox_states_tested": ["PENDING", "SENDING", "SENT_ACCEPTED", "FAILED_RETRYABLE", "DELIVERY_UNKNOWN", "CANCELLED", "EXPIRED"],
+    "twenty_symbol_feature_benchmark_seconds": 21.182,
+    "twenty_symbol_feature_benchmark_scope": "合成20日分钟历史的本地特征计算；不含网络、模型、数据库及投递",
+    "production_p95_latency_ms": null
+  },
+  "candidate_new_natural_day": {
+    "shadow_run_observed": false,
+    "real_message_review_observed": false,
+    "security_rules_verified_for_11_holdings": false,
+    "broker_truth_verified": false,
+    "human_prod_approval": false
+  }
+}

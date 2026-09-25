@@ -1083,7 +1083,11 @@ def build_context(agent_name: str, stock_agent_id: int | None = None) -> AgentCo
 
     model, service = resolve_ai_model(agent_name, stock_agent_id)
     ai_client = _build_ai_client(model, service, proxy)
-    channels = resolve_notify_channels(agent_name, stock_agent_id)
+    discipline_mode = (_get_app_setting("portfolio_discipline_mode") or "").strip().lower() == "enabled"
+    legacy_action_sender = agent_name in {"premarket_outlook", "daily_report", "news_digest",
+                                          "chart_analyst", "tradingagents"}
+    suppress_legacy = discipline_mode and legacy_action_sender
+    channels = [] if suppress_legacy else resolve_notify_channels(agent_name, stock_agent_id)
     notifier = _build_notifier(channels)
 
     model_label = f"{service.name}/{model.model}" if model and service else ""
@@ -1095,6 +1099,7 @@ def build_context(agent_name: str, stock_agent_id: int | None = None) -> AgentCo
         portfolio=portfolio,
         model_label=model_label,
         notify_policy=getattr(notifier, "policy", None),
+        suppress_notify=suppress_legacy,
     )
 
 
@@ -1368,7 +1373,10 @@ async def trigger_agent_for_stock(
     portfolio = load_portfolio_for_stock(stock.id)
 
     model, service = resolve_ai_model(agent_name, stock_agent_id)
-    channels = [] if suppress_notify else resolve_notify_channels(agent_name, stock_agent_id)
+    discipline_mode = (_get_app_setting("portfolio_discipline_mode") or "").strip().lower() == "enabled"
+    suppress_legacy = discipline_mode and agent_name in {"premarket_outlook", "daily_report", "news_digest", "chart_analyst"}
+    effective_suppress = suppress_notify or suppress_legacy
+    channels = [] if effective_suppress else resolve_notify_channels(agent_name, stock_agent_id)
     _log_trigger_info(agent_name, [stock], model, service, channels)
 
     ai_client = _build_ai_client(model, service, proxy)
@@ -1382,7 +1390,7 @@ async def trigger_agent_for_stock(
         config=config,
         portfolio=portfolio,
         model_label=model_label,
-        suppress_notify=suppress_notify,
+        suppress_notify=effective_suppress,
     )
     # 暴露 trace_id / force_refresh 给 agent(供 TradingAgents 进度反馈 + 缓存控制使用)。
     # AgentContext 不强制声明此字段,通过 setattr 注入,其他 agent 不受影响。
@@ -1463,6 +1471,9 @@ async def trigger_agent_for_stock(
 async def lifespan(app):
     """应用生命周期: 初始化 + 启动调度器"""
     init_db()
+    from src.modules.portfolio.notifications import recover_notification_outbox
+
+    recover_notification_outbox(SessionLocal)
     setup_logging()
     # OTel 导出(可选,默认关闭):仅当配置了 OTEL_EXPORTER_OTLP_ENDPOINT 且装了
     # opentelemetry SDK 时启用,否则静默 no-op,不影响现有部署。
@@ -1489,11 +1500,12 @@ async def lifespan(app):
     seed_agents()
     try:
         from src.modules.portfolio.model_router import seed_default_profiles
-        from src.modules.portfolio.prompt_registry import seed_prompts
+        from src.modules.portfolio.prompt_registry import seed_prompts, seed_notification_candidate_prompts
 
         with SessionLocal() as db:
             seed_default_profiles(db)
             seed_prompts(db)
+            seed_notification_candidate_prompts(db)
     except Exception as e:
         logger.warning(f"模型角色初始化失败: {e}")
     try:

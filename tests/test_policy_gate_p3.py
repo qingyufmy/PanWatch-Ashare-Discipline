@@ -7,11 +7,12 @@ from sqlalchemy.orm import Session
 
 from src.modules.portfolio.discipline import create_plan_version
 from src.modules.portfolio.policy_gate import RULE_IDS, evaluate_signal
+from src.modules.automation.suggestion_pool import _journal_action
 from src.modules.portfolio.signal_journal import record_signal
 from src.platform.persistence.database import Base
 from src.platform.persistence.models import (
     ActionableSignal, NextDayAction, PortfolioTruthPosition,
-    PortfolioTruthSnapshot, SignalPolicyDecision,
+    PortfolioTruthSnapshot, SecurityRule, SignalPolicyDecision,
 )
 from src.platform.scheduling import trading_calendar
 
@@ -26,7 +27,7 @@ def _case(*, sellable=800, thesis="VALID", stop=9.0, now=None):
         trade_date=now.astimezone(trading_calendar.ZoneInfo("Asia/Shanghai")).date().isoformat(),
         phase="PREMARKET", source="fixture_broker", fetched_at=naive,
         source_asof=naive, freshness="FRESH", truth_status="TRUSTED",
-        logical_hash="truth-fixture", anomaly_flags=[], account_details=[], cash=10000,
+        logical_hash="truth-fixture", anomaly_flags=[], account_details=[], cash=10000, nav=100000,
     )
     db.add(truth)
     db.flush()
@@ -35,6 +36,10 @@ def _case(*, sellable=800, thesis="VALID", stop=9.0, now=None):
         total_qty=1000, sellable_qty=sellable,
         today_locked_qty=1000 - sellable, avg_cost=10, account_details=[],
     ))
+    db.add(SecurityRule(market="CN", symbol="sh600001", price_tick=0.01,
+                        min_buy_qty=100, buy_step=100, min_sell_qty=100, sell_step=100,
+                        source="fixture_broker",
+                        source_asof=naive, quality_status="VERIFIED"))
     db.commit()
     create_plan_version(
         db, market="CN", symbol="sh600001", position_state="CORE",
@@ -64,7 +69,7 @@ def _signal(db, now, action, *, qty=None, target=None, price=10.5, new_stop=None
 def test_all_policy_rules_persist_before_approval():
     engine, db, now = _case()
     try:
-        signal = _signal(db, now, "REDUCE", qty=100)
+        signal = _signal(db, now, "REDUCE", qty=999, target=0.0945)
         evaluate_signal(db, signal.signal_id, now=now)
         assert signal.status == "APPROVED"
         envelope = db.get(ActionableSignal, signal.signal_id)
@@ -116,7 +121,7 @@ def test_stop_widening_and_invalid_thesis_block_add():
 def test_stale_quote_or_untrusted_truth_never_approves():
     engine, db, now = _case()
     try:
-        signal = _signal(db, now, "REDUCE", qty=100, asof=now - timedelta(minutes=10))
+        signal = _signal(db, now, "REDUCE", qty=100, target=0.0945, asof=now - timedelta(minutes=10))
         evaluate_signal(db, signal.signal_id, now=now)
         assert signal.status == "REVIEW_REQUIRED"
         assert db.get(ActionableSignal, signal.signal_id) is None
@@ -128,10 +133,55 @@ def test_stale_quote_or_untrusted_truth_never_approves():
 def test_missing_schema_fails_closed():
     engine, db, now = _case()
     try:
-        signal = _signal(db, now, "REDUCE", qty=100, schema=False)
+        signal = _signal(db, now, "REDUCE", qty=100, target=0.0945, schema=False)
         evaluate_signal(db, signal.signal_id, now=now)
         assert signal.status == "REVIEW_REQUIRED"
         assert db.get(ActionableSignal, signal.signal_id) is None
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_missing_verified_security_rule_blocks_quantity_approval():
+    engine, db, now = _case()
+    try:
+        db.query(SecurityRule).delete()
+        db.commit()
+        signal = _signal(db, now, "EXIT", qty=1000)
+        evaluate_signal(db, signal.signal_id, now=now)
+        assert signal.status == "REVIEW_REQUIRED"
+        assert db.get(ActionableSignal, signal.signal_id) is None
+        assert db.query(SignalPolicyDecision).filter_by(signal_id=signal.signal_id,
+                                                         rule_id="SECURITY_RULES").one().decision == "REVIEW"
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_add_quantity_comes_from_trusted_nav_cash_and_security_step_not_model_hint():
+    engine, db, now = _case()
+    try:
+        signal = _signal(db, now, "ADD", qty=9999, target=0.12)
+        evaluate_signal(db, signal.signal_id, now=now)
+        assert signal.status == "APPROVED"
+        assert db.get(ActionableSignal, signal.signal_id).approved_qty == 100
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_unresolved_agent_rating_is_not_an_approved_hold():
+    assert _journal_action("alert", {"rating_raw": "review"}) == "REVIEW"
+    assert _journal_action("watch") == "REVIEW"
+    engine, db, now = _case()
+    try:
+        signal = _signal(db, now, "REVIEW")
+        evaluate_signal(db, signal.signal_id, now=now)
+        assert signal.status == "REVIEW_REQUIRED"
+        assert db.get(ActionableSignal, signal.signal_id) is None
+        decision = db.query(SignalPolicyDecision).filter_by(
+            signal_id=signal.signal_id, rule_id="ACTION_RESOLUTION").one()
+        assert decision.reason_codes == ["ACTION_DIRECTION_UNRESOLVED"]
     finally:
         db.close()
         engine.dispose()

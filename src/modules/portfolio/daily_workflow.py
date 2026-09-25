@@ -13,13 +13,21 @@ from pathlib import Path
 from typing import Awaitable, Callable
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from src.modules.portfolio.discipline import capture_truth, logical_hash
 from src.modules.portfolio.issue_ledger import record_issue
-from src.modules.portfolio.minute_features import feature_snapshot, fetch_minute_bars, write_parquet
-from src.modules.portfolio.notifications import send_portfolio_notice
+from src.modules.portfolio.minute_features import (
+    feature_snapshot, fetch_minute_bars, load_historical_bars, write_parquet,
+)
+from src.modules.portfolio.technical_levels import derive_level_snapshot, LEVEL_VERSION
+from src.modules.portfolio.notifications import (
+    dispatch_portfolio_notice, enqueue_portfolio_notice, send_portfolio_notice,
+)
+from src.modules.portfolio.notification_renderer import render_daily_review, render_premarket_plan
+from src.modules.portfolio.decision_router import record_position_decision
 from src.modules.portfolio.model_router import probe_role
 from src.modules.portfolio.prompt_registry import run_portfolio_prompt
 from src.modules.portfolio.signal_journal import record_signal
@@ -28,7 +36,8 @@ from src.platform.persistence.database import SessionLocal
 from src.platform.persistence.models import (
     DailyPortfolioPlan, ExecutionEvent, ModelProfile, ModelRun, NewsCache,
     NextDayAction, PortfolioTruthSnapshot, PortfolioWorkflowRun,
-    PositionPlan, SignalEvent,
+    PositionPlan, SignalEvent, PortfolioFeatureSnapshot, PortfolioLevelSnapshot,
+    PortfolioDecision, PortfolioNotification,
 )
 from src.platform.scheduling import trading_calendar
 from src.platform.scheduling.trading_calendar import next_confirmed_cn_trading_day
@@ -49,7 +58,7 @@ FIXED_STEPS = (
     ("EVENING_DEEP", "20:45"), ("NEXT_DAY_DRAFT", "21:10"),
     ("P10_REVIEW", "21:20"),
 )
-MONITOR_STARTS = ((time(9, 30), time(11, 30)), (time(13, 0), time(14, 30)))
+MONITOR_STARTS = ((time(9, 30), time(11, 30)), (time(13, 0), time(15, 0)))
 
 
 def _now_sh(now: datetime | None = None) -> datetime:
@@ -167,7 +176,8 @@ def _risk_scan(day: str, db_factory, *, asof: datetime | None = None,
                       "YELLOW": "STOP_OR_FRESH_PRICE_UNVERIFIED"}[color]
             rows.append({"symbol": p.symbol, "color": color, "reason": reason,
                          "price": price, "market_data_asof": market_asof, "market_data_source": source,
-                         "current_stop": stop, "sellable_qty": p.sellable_qty})
+                         "current_stop": stop, "sellable_qty": p.sellable_qty,
+                         "plan_version": plan.version if plan else None})
             if color == "RED" and source == "tencent_quote":
                 pending_confirmations[len(rows) - 1] = _MINUTE_VERIFY_POOL.submit(
                     minute_fetcher, _vendor_symbol(p.symbol), day,
@@ -213,7 +223,9 @@ async def _feature_refresh(day: str, db_factory, now: datetime) -> dict:
         try:
             frame, failures = await asyncio.to_thread(fetch_minute_bars, symbol, day)
             path = write_parquet(frame, MINUTE_ROOT)
-            feature = feature_snapshot(frame)
+            history = await asyncio.to_thread(load_historical_bars, MINUTE_ROOT, symbol, day)
+            feature = feature_snapshot(frame, decision_time=now, history=history)
+            level_frame = pd.concat([history, frame], ignore_index=True) if not history.empty else frame
             market_asof = datetime.fromisoformat(feature["market_data_asof"])
             age = (now.astimezone(SH) - market_asof).total_seconds()
             status = "OK" if -30 <= age <= 120 and not feature["missing_minutes"] else "STALE"
@@ -222,10 +234,38 @@ async def _feature_refresh(day: str, db_factory, now: datetime) -> dict:
                     record_issue(db, category="DATA_STALE", code="MINUTE_FRESHNESS", source=feature["market_data_source"],
                                  title="Minute data stale or incomplete",
                                  context={"symbol": position["symbol"], "asof": feature["market_data_asof"],
-                                          "age_seconds": int(age), "missing": len(feature["missing_minutes"])})
+                                         "age_seconds": int(age), "missing": len(feature["missing_minutes"])})
+            with db_factory() as db:
+                prior = (db.query(PortfolioLevelSnapshot)
+                         .filter_by(symbol=symbol).order_by(PortfolioLevelSnapshot.id.desc()).first())
+                level = derive_level_snapshot(level_frame, feature, prior=prior.payload if prior else None,
+                                              decision_time=now)
+                existing = (db.query(PortfolioFeatureSnapshot).filter_by(symbol=symbol,
+                            source_hash=feature["source_hash"]).first())
+                if existing is None:
+                    asof_utc = market_asof.astimezone(timezone.utc).replace(tzinfo=None)
+                    fetched_utc = datetime.fromisoformat(str(frame.fetched_at.iloc[-1])).astimezone(timezone.utc).replace(tzinfo=None)
+                    feature_row = PortfolioFeatureSnapshot(
+                        symbol=symbol, trade_date=day, version=feature["feature_version"],
+                        source_vendor=feature["market_data_source"], market_asof=asof_utc,
+                        fetched_at=fetched_utc, source_hash=feature["source_hash"],
+                        quality_status=status, payload=feature,
+                    )
+                    db.add(feature_row)
+                    db.flush()
+                    db.add(PortfolioLevelSnapshot(
+                        symbol=symbol, trade_date=day, version=LEVEL_VERSION,
+                        feature_snapshot_id=feature_row.id,
+                        prior_level_snapshot_id=prior.id if prior else None,
+                        market_asof=asof_utc, source_hash=logical_hash(level),
+                        quality_status=level["quality_status"], payload=level,
+                    ))
+                    db.commit()
             return {"symbol": position["symbol"], "status": status, "path": str(path),
                     "asof": feature["market_data_asof"], "bar_count": feature["bar_count"],
                     "missing_count": len(feature["missing_minutes"]),
+                    "feature_version": feature["feature_version"],
+                    "level_quality": level["quality_status"],
                     "source_failures": failures}
         except Exception as exc:
             with db_factory() as db:
@@ -269,8 +309,9 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None) -> 
                                   input_hash=logical_hash(payload), output_hash=logical_hash(frozen),
                                   payload=frozen)
         db.add(plan)
-        db.commit()
+        db.flush()
         signal_ids = []
+        signals = []
         for action in proposal.proposals:
             evidence_payload = {"schema_valid": True, "model_conflict": False,
                                 "market_data_source": None, "market_data_asof": None,
@@ -285,19 +326,26 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None) -> 
                 qty_hint=action.qty_hint, target_weight=action.target_weight,
                 prompt_id="flash", prompt_version=prompt_version, model_role=model.requested_role,
                 requested_model=model.requested_model, reported_model=model.reported_model,
+                commit=False,
             )
             if created:
-                evaluate_signal(db, signal.signal_id, now=now)
+                evaluate_signal(db, signal.signal_id, now=now, commit=False)
+                record_position_decision(db, signal, now=now)
             signal_ids.append(signal.signal_id)
+            signals.append(signal)
+        title, content = render_premarket_plan(proposal.proposals, signals, positions)
+        notice, _ = enqueue_portfolio_notice(
+            db, key=f"plan:{day}:{version}", title=title, content=content,
+            trade_date=day, signal_ids=signal_ids, reason="PREMARKET_PLAN",
+        )
+        notice_id = notice.id
+        db.commit()
         result = {"status": "REVIEW", "reason": "USER_ATTESTED_AND_PREMARKET_DATA_UNVERIFIED",
                   "daily_plan_id": plan.id, "daily_plan_version": version,
                   "model_run_id": model.run_id, "coverage": len(proposal.proposals),
                   "signal_ids": signal_ids}
-    lines = [f"{p.symbol} {p.action}（待复核）" for p in proposal.proposals]
-    result["notification"] = await send_portfolio_notice(
-        key=f"plan:{day}", title=f"A股持仓盘前计划 {day}",
-        content=f"覆盖 {len(lines)} 只持仓；账户与盘前行情仍待核对，仅供人工参考。\n" + "\n".join(lines),
-        db_factory=db_factory, timeout_seconds=12)
+    result["notification"] = await dispatch_portfolio_notice(
+        notice_id, db_factory=db_factory, timeout_seconds=12)
     return result
 
 
@@ -368,13 +416,20 @@ async def _simple_step(step: str, day: str, db_factory, now: datetime) -> dict:
         result = _risk_scan(day, db_factory, asof=now)
         red = [p for p in result.get("positions", []) if p.get("color") == "RED"]
         if red and step in {"HARD_RISK", "RISK_SCAN", "OPEN_CONFIRM", "CLOSING_RISK"}:
-            symbols = ",".join(sorted(p["symbol"] for p in red))
-            lines = [f"{p['symbol']} 现价 {p['price']:.2f}，观察价 {float(p['current_stop']):.2f}"
-                     for p in red]
-            result["notification"] = await send_portfolio_notice(
-                key=f"hard-risk:{day}:{symbols}", title=f"A股持仓风险提醒 {day}",
-                content="以下持仓触及停止观察价，请人工核对实时行情及可卖数量；系统未下单。\n" + "\n".join(lines),
-                db_factory=db_factory, timeout_seconds=5)
+            notices = {}
+            for p in red:
+                notices[p["symbol"]] = await send_portfolio_notice(
+                    key=f"hard-risk:{day}:{p['symbol']}:{p['plan_version']}:{p['reason']}",
+                    title=f"风险复核｜{p['symbol']}｜观察价触及",
+                    content=(f"状态：风险告警，未获交易批准，未执行。\n"
+                             f"现价 {p['price']:.2f} 元｜行情时刻 {p['market_data_asof']}｜来源 {p['market_data_source']}。\n"
+                             f"观察价 {float(p['current_stop']):.2f} 元已触及；此价不等于自动止损指令。\n"
+                             f"请人工核对行情、今日可卖数量与现行持仓计划。"),
+                    db_factory=db_factory, timeout_seconds=5,
+                    trade_date=day, symbol=p["symbol"], priority="CRITICAL", reason=p["reason"])
+            result["notifications"] = notices
+            result["notification"] = {"status": "SENT" if any(n["status"] == "SENT" for n in notices.values())
+                                      else "SKIPPED", "count": len(notices)}
         return result
     if step == "FEATURE_REFRESH":
         return await _feature_refresh(day, db_factory, now)
@@ -423,7 +478,23 @@ async def _simple_step(step: str, day: str, db_factory, now: datetime) -> dict:
         if step == "EXCEPTION_REVIEW" and not any(s.status == "POLICY_REJECTED" for s in signals):
             return {"status": "SUCCEEDED", "reason": "NO_POLICY_EXCEPTION", **evidence}
         prompt_id = "deep" if step in {"EXCEPTION_REVIEW", "WEEKLY_REVIEW"} else "review"
-        return await _model_review(day, db_factory, prompt_id, step, evidence)
+        review = await _model_review(day, db_factory, prompt_id, step, evidence)
+        if step == "DAILY_REVIEW":
+            with db_factory() as db:
+                decisions = db.query(PortfolioDecision).filter_by(trade_date=day).all()
+                notifications = db.query(PortfolioNotification).filter_by(trade_date=day).all()
+                truth = _latest_truth(db, day)
+                title, body = render_daily_review(
+                    trade_date=day, decisions=decisions, notifications=notifications,
+                    executions=executions, truth_status=truth.truth_status if truth else "MISSING",
+                    next_day_count=len(next_day),
+                )
+            review["notification"] = await send_portfolio_notice(
+                key=f"daily-review:{day}", title=title, content=body,
+                db_factory=db_factory, timeout_seconds=12,
+                trade_date=day, reason="DAILY_REVIEW",
+            )
+        return review
     if step in {"DEEP_REVIEW", "EVENING_DEEP"}:
         risk = _risk_scan(day, db_factory, asof=now)
         with db_factory() as db:
@@ -588,7 +659,7 @@ def register_jobs(agent_scheduler) -> int:
         count += 1
     ranges = ((9, "30-59", "30,35,40,45,50,55"),
               (10, "*", "*/5"), (11, "0-30", "0,5,10,15,20,25,30"),
-              (13, "*", "*/5"), (14, "0-30", "0,5,10,15,20,25,30"))
+              (13, "*", "*/5"), (14, "*", "*/5"), (15, "0", "0"))
     for hour, minute, feature_minute in ranges:
         for step, spec in (("HARD_RISK", minute), ("FEATURE_REFRESH", feature_minute)):
             scheduler.add_job(run_step, "cron", args=[step], hour=hour, minute=spec,

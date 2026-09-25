@@ -1517,6 +1517,7 @@ class ExecutionEvent(Base):
     __table_args__ = (Index("ix_execution_signal", "signal_id", "execution_id"),)
 
     execution_id = Column(String(64), primary_key=True)
+    client_request_id = Column(String(64), nullable=True, unique=True)
     signal_id = Column(String(64), ForeignKey("signal_events.signal_id"), nullable=False)
     planned_action = Column(String(16), nullable=False)
     planned_qty = Column(Integer, nullable=True)
@@ -1685,3 +1686,122 @@ class PortfolioWorkflowRun(Base):
     payload = Column(JSON, nullable=False, default=dict)
     started_at = Column(DateTime, nullable=False)
     finished_at = Column(DateTime, nullable=True)
+
+
+class PortfolioFeatureSnapshot(Base):
+    """Immutable normalized feature evidence; fetched time is distinct from market asof."""
+
+    __tablename__ = "portfolio_feature_snapshots"
+    __table_args__ = (Index("ix_portfolio_feature_symbol_asof", "symbol", "market_asof", "id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(32), nullable=False)
+    trade_date = Column(String(10), nullable=False)
+    version = Column(String(32), nullable=False)
+    source_vendor = Column(String(32), nullable=False)
+    market_asof = Column(DateTime, nullable=False)
+    fetched_at = Column(DateTime, nullable=False)
+    source_hash = Column(String(64), nullable=False)
+    quality_status = Column(String(24), nullable=False)
+    payload = Column(JSON, nullable=False)
+
+
+class PortfolioLevelSnapshot(Base):
+    """Append-only level revision, compared with its frozen predecessor."""
+
+    __tablename__ = "portfolio_level_snapshots"
+    __table_args__ = (Index("ix_portfolio_level_symbol_asof", "symbol", "market_asof", "id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(32), nullable=False)
+    trade_date = Column(String(10), nullable=False)
+    version = Column(String(32), nullable=False)
+    feature_snapshot_id = Column(Integer, ForeignKey("portfolio_feature_snapshots.id"), nullable=False)
+    prior_level_snapshot_id = Column(Integer, ForeignKey("portfolio_level_snapshots.id"), nullable=True)
+    market_asof = Column(DateTime, nullable=False)
+    source_hash = Column(String(64), nullable=False)
+    quality_status = Column(String(24), nullable=False)
+    payload = Column(JSON, nullable=False)
+
+
+class PortfolioDecision(Base):
+    """One versioned current decision per held position, separate from model proposals."""
+
+    __tablename__ = "portfolio_decisions"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "symbol", "revision", name="uq_portfolio_decision_revision"),
+        Index("ix_portfolio_decision_current", "symbol", "current", "id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_date = Column(String(10), nullable=False)
+    market = Column(String(8), nullable=False)
+    symbol = Column(String(32), nullable=False)
+    revision = Column(Integer, nullable=False)
+    signal_id = Column(String(64), ForeignKey("signal_events.signal_id"), nullable=False)
+    plan_version = Column(Integer, nullable=True)
+    level_snapshot_id = Column(Integer, ForeignKey("portfolio_level_snapshots.id"), nullable=True)
+    action = Column(String(16), nullable=False)
+    approved_qty = Column(Integer, nullable=True)
+    decision_status = Column(String(32), nullable=False)
+    risk_status = Column(String(32), nullable=False)
+    data_status = Column(String(32), nullable=False)
+    execution_status = Column(String(32), nullable=False)
+    semantic_hash = Column(String(64), nullable=False)
+    current = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+
+
+class PortfolioNotification(Base):
+    """Private durable outbox; webhook acceptance is not a read or trade receipt."""
+
+    __tablename__ = "portfolio_notifications"
+    __table_args__ = (
+        UniqueConstraint("semantic_key", name="uq_portfolio_notification_key"),
+        Index("ix_portfolio_notification_state", "delivery_status", "expires_at"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    semantic_key = Column(String(255), nullable=False)
+    trade_date = Column(String(10), nullable=False)
+    symbol = Column(String(32), nullable=True)
+    decision_id = Column(Integer, ForeignKey("portfolio_decisions.id"), nullable=True)
+    signal_ids = Column(JSON, nullable=False, default=list)
+    channel_id = Column(Integer, ForeignKey("notify_channels.id"), nullable=True)
+    template_version = Column(String(32), nullable=False)
+    title = Column(String(255), nullable=False)
+    body = Column(Text, nullable=False)
+    rendered_content_hash = Column(String(64), nullable=False)
+    decision_revision = Column(Integer, nullable=True)
+    priority = Column(String(16), nullable=False)
+    reason = Column(String(80), nullable=False)
+    suppression_reason = Column(String(80), nullable=True)
+    queued_at = Column(DateTime, nullable=False)
+    attempt_started_at = Column(DateTime, nullable=True)
+    provider_accepted_at = Column(DateTime, nullable=True)
+    delivery_status = Column(String(32), nullable=False)
+    provider_message_id = Column(String(128), nullable=True)
+    ack_status = Column(String(24), nullable=False, default="NOT_OBSERVED")
+    retry_count = Column(Integer, nullable=False, default=0)
+    supersedes_id = Column(String(64), nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+
+
+class SecurityRule(Base):
+    """Verified per-security tick and share step; no guessed market-wide fallback."""
+
+    __tablename__ = "security_rules"
+    __table_args__ = (UniqueConstraint("market", "symbol", name="uq_security_rule_symbol"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    market = Column(String(8), nullable=False)
+    symbol = Column(String(32), nullable=False)
+    price_tick = Column(Float, nullable=False)
+    min_buy_qty = Column(Integer, nullable=False)
+    buy_step = Column(Integer, nullable=False)
+    min_sell_qty = Column(Integer, nullable=False)
+    sell_step = Column(Integer, nullable=False)
+    source = Column(String(80), nullable=False)
+    source_asof = Column(DateTime, nullable=False)
+    quality_status = Column(String(24), nullable=False)

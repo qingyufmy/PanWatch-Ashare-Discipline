@@ -7,10 +7,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from src.modules.portfolio.signal_journal import record_manual_execution, reconcile_execution, transition_signal
-from src.platform.persistence.database import get_db
+from src.modules.portfolio.notifications import dispatch_portfolio_notice
+from src.platform.persistence.database import SessionLocal, get_db
 from src.platform.persistence.models import (
     ActionableSignal, DisciplineEvent, ExecutionEvent, NextDayAction,
-    SignalEvent, SignalLifecycleEvent, SignalPolicyDecision,
+    SignalEvent, SignalLifecycleEvent, SignalPolicyDecision, PortfolioNotification,
 )
 
 
@@ -27,6 +28,7 @@ class ManualExecutionRequest(BaseModel):
     actual_price: float | None = Field(default=None, gt=0)
     executed_at: datetime
     notes: str = ""
+    client_request_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class ReconcileRequest(BaseModel):
@@ -117,15 +119,19 @@ def ignore_signal(signal_id: str, body: IgnoreRequest, db: Session = Depends(get
 
 
 @router.post("/signals/{signal_id}/executions")
-def create_manual_execution(signal_id: str, body: ManualExecutionRequest, db: Session = Depends(get_db)):
+async def create_manual_execution(signal_id: str, body: ManualExecutionRequest, db: Session = Depends(get_db)):
     try:
         row = record_manual_execution(
             db, signal_id=signal_id, actual_action=body.actual_action,
             actual_qty=body.actual_qty, actual_price=body.actual_price,
             executed_at=body.executed_at, notes=body.notes,
+            client_request_id=body.client_request_id,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    notice = db.query(PortfolioNotification).filter_by(semantic_key=f"execution:{row.execution_id}").first()
+    if notice and notice.delivery_status == "PENDING":
+        await dispatch_portfolio_notice(notice.id, db_factory=SessionLocal)
     return _execution(row)
 
 

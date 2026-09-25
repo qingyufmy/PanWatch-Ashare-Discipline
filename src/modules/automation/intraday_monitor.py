@@ -15,7 +15,10 @@ from src.modules.research.context_store import (
     save_agent_context_run,
     save_agent_prediction_outcome,
 )
-from src.modules.automation.suggestion_pool import save_suggestion
+from src.modules.automation.suggestion_pool import save_suggestion_result
+from src.modules.portfolio.notifications import dispatch_portfolio_notice
+from src.platform.persistence.database import SessionLocal
+from src.platform.persistence.models import PortfolioFeatureSnapshot, PortfolioLevelSnapshot
 from src.modules.research.signals import SignalPackBuilder
 from src.modules.research.signals.structured_output import try_parse_action_json
 from src.platform.marketdata.models import MarketCode, StockData, MARKETS
@@ -54,6 +57,38 @@ SUGGESTION_TYPES = {
 PROMPT_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "intraday_monitor.txt"
 BATCH_PROMPT_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "intraday_monitor_batch.txt"
 _BATCH_ACTIONS = {"buy", "add", "reduce", "sell", "hold", "watch", "alert", "avoid"}
+
+
+def _frozen_portfolio_evidence(symbols: list[str]) -> dict[str, dict]:
+    """One read of already-frozen P6 evidence; failures cannot invent a price."""
+    frozen = {}
+    try:
+        with SessionLocal() as db:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            for symbol in symbols:
+                vendor_symbol = symbol if len(symbol) == 8 else (
+                    ("sh" if symbol.startswith(("6", "9")) else
+                     "bj" if symbol.startswith(("4", "8")) else "sz") + symbol
+                ) if len(symbol) == 6 and symbol.isdigit() else symbol
+                feature = (db.query(PortfolioFeatureSnapshot).filter_by(symbol=vendor_symbol)
+                           .filter(PortfolioFeatureSnapshot.market_asof <= now)
+                           .order_by(PortfolioFeatureSnapshot.id.desc()).first())
+                if feature is None or (now - feature.market_asof).total_seconds() > 120 or feature.quality_status != "OK":
+                    continue
+                level = (db.query(PortfolioLevelSnapshot).filter_by(feature_snapshot_id=feature.id)
+                         .order_by(PortfolioLevelSnapshot.id.desc()).first())
+                if level is None:
+                    continue
+                frozen[symbol] = {
+                    "feature_snapshot_id": feature.id, "level_snapshot_id": level.id,
+                    "market_data_asof": (feature.payload or {}).get("market_data_asof"),
+                    "market_data_source": feature.source_vendor,
+                    "latest_close": (feature.payload or {}).get("latest_close"),
+                    "level": level.payload,
+                }
+    except Exception as exc:
+        logger.warning("冻结持仓特征读取失败，动作通知将保持待复核: %s", type(exc).__name__)
+    return frozen
 
 
 class IntradayMonitorAgent(BaseAgent):
@@ -103,7 +138,9 @@ class IntradayMonitorAgent(BaseAgent):
 
     async def run(self, context: AgentContext) -> AnalysisResult:
         """Scheduled batch mode makes one model call for the complete watchlist."""
-        if len(context.watchlist) <= 1:
+        if len(context.watchlist) == 1:
+            return await self.run_single(context, context.watchlist[0].symbol)
+        if not context.watchlist:
             return await super().run(context)
 
         active = [
@@ -133,7 +170,9 @@ class IntradayMonitorAgent(BaseAgent):
         if missing:
             raise RuntimeError(f"盘中批量行情缺失: {','.join(missing)}")
 
+        frozen_by_symbol = _frozen_portfolio_evidence([s.symbol for s in active])
         inputs = []
+        selected = []
         for stock in active:
             pack = packs[stock.symbol]
             quote = pack.quote
@@ -161,12 +200,14 @@ class IntradayMonitorAgent(BaseAgent):
                 price_threshold=self.price_alert_threshold,
                 volume_threshold=self.volume_alert_ratio,
             )
+            if not self.event_only or bool(getattr(event, "should_analyze", False)):
+                selected.append(stock)
             inputs.append({
                 "symbol": stock.symbol,
                 "name": stock.name,
                 "market": stock.market.value,
                 "quote": {
-                    "price": quote.current_price,
+                    "price": frozen_by_symbol.get(stock.symbol, {}).get("latest_close", quote.current_price),
                     "change_pct": quote.change_pct,
                     "volume": quote.volume,
                     "turnover": quote.turnover,
@@ -178,9 +219,19 @@ class IntradayMonitorAgent(BaseAgent):
                 )},
                 "positions": position_rows,
                 "event_reasons": event.reasons,
+                "frozen_portfolio_evidence": frozen_by_symbol.get(stock.symbol),
                 "news": [item.get("title", "") for item in ((pack.news.items if pack.news else []) or [])[:2]],
                 "missing": pack.missing,
             })
+
+        if not selected:
+            return AnalysisResult(
+                agent_name=self.name, title="【盘中监测】无持仓异动",
+                content=f"已扫描 {len(active)} 只持仓；没有需模型解释的事件。",
+                raw_data={"batch_size": len(active), "model_coverage": 0,
+                          "symbols": [s.symbol for s in active], "notified": False,
+                          "notify_skipped": "no_event"},
+            )
 
         user_content = json.dumps({
             "time": datetime.now().isoformat(timespec="minutes"),
@@ -191,21 +242,21 @@ class IntradayMonitorAgent(BaseAgent):
                 "stop_loss_pnl_pct": self.stop_loss_warning,
                 "take_profit_pnl_pct": self.take_profit_warning,
             },
-            "stocks": inputs,
+            "stocks": [item for item in inputs if item["symbol"] in {s.symbol for s in selected}],
         }, ensure_ascii=False, default=str)
         raw_response = await context.ai_client.chat(
             BATCH_PROMPT_PATH.read_text(encoding="utf-8"), user_content
         )
-        suggestions = self._parse_batch_response(raw_response, {s.symbol for s in active})
+        suggestions = self._parse_batch_response(raw_response, {s.symbol for s in selected})
 
         analysis_date = datetime.now().date().isoformat()
         alerts = []
         inputs_by_symbol = {item["symbol"]: item for item in inputs}
-        for stock in active:
+        for stock in selected:
             item = suggestions[stock.symbol]
             suggestion = self._parse_suggestion(json.dumps(item, ensure_ascii=False))
             quote = packs[stock.symbol].quote
-            save_suggestion(
+            saved = save_suggestion_result(
                 stock_symbol=stock.symbol,
                 stock_name=stock.name,
                 action=suggestion["action"],
@@ -218,44 +269,39 @@ class IntradayMonitorAgent(BaseAgent):
                 prompt_context=user_content,
                 ai_response=json.dumps(item, ensure_ascii=False),
                 stock_market=stock.market.value,
+                queue_notification=not context.suppress_notify,
                 meta={
-                    "quote": {"current_price": quote.current_price, "change_pct": quote.change_pct},
+                    "quote": {"current_price": frozen_by_symbol.get(stock.symbol, {}).get("latest_close", quote.current_price),
+                              "change_pct": quote.change_pct},
+                    "market_data_source": frozen_by_symbol.get(stock.symbol, {}).get("market_data_source"),
+                    "market_data_asof": frozen_by_symbol.get(stock.symbol, {}).get("market_data_asof"),
+                    "feature_snapshot_id": frozen_by_symbol.get(stock.symbol, {}).get("feature_snapshot_id"),
+                    "level_snapshot_id": frozen_by_symbol.get(stock.symbol, {}).get("level_snapshot_id"),
+                    "schema_valid": True,
                     "analysis_date": analysis_date,
-                    "batch_size": len(active),
+                    "batch_size": len(selected),
                     "event_gate": inputs_by_symbol[stock.symbol]["event_reasons"],
                 },
             )
-            if suggestion["should_alert"] and (
-                self.bypass_throttle or self._check_throttle(stock.symbol)
-            ):
-                alerts.append((stock.symbol, self._format_human_readable_content(
-                    quote, suggestion, json.dumps(item, ensure_ascii=False)
-                )))
+            if saved.persisted and saved.notification_id:
+                alerts.append((stock.symbol, saved.notification_id))
 
         result = AnalysisResult(
             agent_name=self.name,
             title=f"【盘中监测】{len(active)}只持仓批量分析",
-            content=f"已一次请求分析 {len(active)} 只持仓；需提醒 {len(alerts)} 只。",
-            raw_data={"batch_size": len(active), "symbols": [s.symbol for s in active], "notified": False},
+            content=f"已扫描 {len(active)} 只持仓，一次请求解释 {len(selected)} 只；获批提醒 {len(alerts)} 只。",
+            raw_data={"batch_size": len(active), "model_coverage": len(selected),
+                      "symbols": [s.symbol for s in active], "notified": False},
         )
         if not alerts or context.suppress_notify:
             if context.suppress_notify:
                 result.raw_data["notify_skipped"] = "suppressed"
             return result
 
-        message = "\n\n".join(body for _, body in alerts)
-        if context.model_label:
-            message += f"\n\n---\nAI: {context.model_label}"
-        sent = await context.notifier.notify_with_result(result.title, message)
-        result.raw_data["notified"] = bool(sent.get("success"))
-        if sent.get("success"):
-            if not self.bypass_throttle:
-                for symbol, _ in alerts:
-                    self._update_throttle(symbol)
-        elif sent.get("skipped"):
-            result.raw_data["notify_skipped"] = sent["skipped"]
-        else:
-            result.raw_data["notify_error"] = sent.get("error") or "通知发送失败"
+        delivery = [await dispatch_portfolio_notice(notification_id, db_factory=SessionLocal)
+                    for _, notification_id in alerts]
+        result.raw_data["notified"] = any(item["status"] == "SENT" for item in delivery)
+        result.raw_data["delivery"] = delivery
         return result
 
     @staticmethod
@@ -939,14 +985,16 @@ class IntradayMonitorAgent(BaseAgent):
             )
 
         system_prompt, user_content = self.build_prompt(data, context)
+        frozen_evidence = data.get("frozen_portfolio_evidence")
+        if frozen_evidence:
+            user_content += "\n\nFrozen portfolio evidence (the only source for action prices):\n" + json.dumps(
+                frozen_evidence, ensure_ascii=False, default=str)
 
-        # 打印完整 prompt 用于调试
-        logger.info(f"=== Prompt for {stock.symbol} ===\n{user_content}")
+        logger.info("盘中模型输入 %s chars=%s", stock.symbol, len(user_content))
 
         raw_content = await context.ai_client.chat(system_prompt, user_content)
 
-        # 打印 AI 返回结果
-        logger.info(f"=== AI Response for {stock.symbol} ===\n{raw_content}")
+        logger.info("盘中模型输出 %s chars=%s", stock.symbol, len(raw_content or ""))
 
         # 解析操作建议
         suggestion = self._parse_suggestion(raw_content)
@@ -962,7 +1010,7 @@ class IntradayMonitorAgent(BaseAgent):
             content = self._format_human_readable_content(stock, suggestion, raw_content)
 
         # 保存到建议池（包含 prompt 上下文）
-        save_suggestion(
+        saved = save_suggestion_result(
             stock_symbol=stock.symbol,
             stock_name=stock.name,
             action=suggestion["action"],
@@ -975,11 +1023,17 @@ class IntradayMonitorAgent(BaseAgent):
             prompt_context=user_content,  # 保存 prompt 上下文
             ai_response=raw_content,  # 保存 AI 原始响应
             stock_market=stock.market.value,
+            queue_notification=not context.suppress_notify,
             meta={
                 "quote": {
-                    "current_price": stock.current_price,
+                    "current_price": frozen_evidence.get("latest_close") if frozen_evidence else stock.current_price,
                     "change_pct": stock.change_pct,
                 },
+                "market_data_source": frozen_evidence.get("market_data_source") if frozen_evidence else None,
+                "market_data_asof": frozen_evidence.get("market_data_asof") if frozen_evidence else None,
+                "feature_snapshot_id": frozen_evidence.get("feature_snapshot_id") if frozen_evidence else None,
+                "level_snapshot_id": frozen_evidence.get("level_snapshot_id") if frozen_evidence else None,
+                "schema_valid": bool(try_parse_action_json(raw_content)),
                 "kline_meta": {
                     "computed_at": (data.get("kline_summary") or {}).get("computed_at"),
                     "asof": (data.get("kline_summary") or {}).get("asof"),
@@ -1059,7 +1113,10 @@ class IntradayMonitorAgent(BaseAgent):
                     "change_pct": stock.change_pct,
                 },
                 "suggestion": suggestion,
-                "should_alert": suggestion["should_alert"],
+                "should_alert": bool(saved.notification_id),
+                "suggestion_write": {"persisted": saved.persisted, "signal_id": saved.signal_id,
+                                     "decision_status": saved.decision_status,
+                                     "notification_id": saved.notification_id, "reason": saved.reason},
                 "kline_summary": data.get("kline_summary"),
                 "symbol_context": data.get("symbol_context") or {},
                 "quality_overview": data.get("quality_overview") or {},
@@ -1068,37 +1125,8 @@ class IntradayMonitorAgent(BaseAgent):
         )
 
     async def should_notify(self, result: AnalysisResult) -> bool:
-        """检查是否需要通知"""
-        # 跳过的结果不通知
-        if result.raw_data.get("skipped"):
-            return False
-
-        # AI 判断不需要提醒
-        if not result.raw_data.get("should_alert", True):
-            logger.info(
-                f"AI 判断无需提醒: {result.raw_data.get('stock', {}).get('symbol')}"
-            )
-            return False
-
-        stock_data = result.raw_data.get("stock")
-        if not stock_data:
-            return False
-
-        symbol = stock_data.get("symbol")
-        if not symbol:
-            return False
-
-        # 检查节流（测试模式可跳过）
-        if not self.bypass_throttle:
-            if not self._check_throttle(symbol):
-                logger.info(
-                    f"通知节流: {symbol} 在 {self.throttle_minutes} 分钟内已通知"
-                )
-                return False
-        else:
-            logger.info(f"跳过节流检查（测试模式）: {symbol}")
-
-        return True
+        """Legacy BaseAgent publisher is never the portfolio action outlet."""
+        return False
 
     def _check_throttle(self, symbol: str) -> bool:
         """检查是否可以发送通知（未被节流）"""
@@ -1188,9 +1216,9 @@ class IntradayMonitorAgent(BaseAgent):
             data = await self.collect(context)
             if not data.get("stock_data"):
                 return None
+            data["frozen_portfolio_evidence"] = _frozen_portfolio_evidence([stock_symbol]).get(stock_symbol)
 
-            # 事件门禁仅作为上下文信号，不阻断 AI 分析。
-            # 产品策略：建议持续刷新，通知再由 should_alert + throttle 控制降噪。
+            # Only events use the paid model. A failed gate fails closed.
             if self.event_only:
                 try:
                     from src.modules.strategy.intraday_event_gate import check_and_update
@@ -1209,8 +1237,18 @@ class IntradayMonitorAgent(BaseAgent):
                         "reasons": decision.reasons,
                         "should_analyze": bool(decision.should_analyze),
                     }
+                    if not decision.should_analyze:
+                        return AnalysisResult(agent_name=self.name,
+                                              title="【盘中监测】无持仓异动",
+                                              content=f"{stock_symbol} 无需模型解释",
+                                              raw_data={"skipped": True, "notified": False,
+                                                        "notify_skipped": "no_event"})
                 except Exception as e:
-                    logger.debug(f"事件门禁异常，继续分析: {e}")
+                    logger.warning(f"事件门禁异常，跳过模型调用: {e}")
+                    return AnalysisResult(agent_name=self.name, title="【盘中监测】事件门禁异常",
+                                          content=f"{stock_symbol} 事件门禁异常，未调用模型",
+                                          raw_data={"skipped": True, "notified": False,
+                                                    "notify_skipped": "event_gate_failed"})
 
             result = await self.analyze(context, data)
 
@@ -1219,26 +1257,12 @@ class IntradayMonitorAgent(BaseAgent):
                 result.raw_data["notify_skipped"] = "suppressed"
                 return result
 
-            if await self.should_notify(result):
-                notify_result = await context.notifier.notify_with_result(
-                    result.title,
-                    result.content,
-                    result.images,
-                )
-                notified = bool(notify_result.get("success"))
+            notification_id = (result.raw_data.get("suggestion_write") or {}).get("notification_id")
+            if notification_id:
+                notify_result = await dispatch_portfolio_notice(notification_id, db_factory=SessionLocal)
+                notified = notify_result.get("status") == "SENT"
                 result.raw_data["notified"] = notified
-                if notified:
-                    logger.info(
-                        f"Agent [{self.display_name}] 通知已发送: {stock_symbol}"
-                    )
-                    if not self.bypass_throttle:
-                        self._update_throttle(stock_symbol)
-                else:
-                    notify_error = notify_result.get("error") or "未知错误"
-                    result.raw_data["notify_error"] = notify_error
-                    logger.error(
-                        f"Agent [{self.display_name}] 通知发送失败: {stock_symbol} - {notify_error}"
-                    )
+                result.raw_data["delivery"] = [notify_result]
             else:
                 result.raw_data["notified"] = False
 

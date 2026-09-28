@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from src.platform.marketdata.collectors.discovery_collector import EastMoneyDiscoveryCollector
 from src.platform.persistence.models import MarketRegimeSnapshot
+from src.platform.scheduling.trading_calendar import previous_confirmed_cn_trading_day
 
 SH = ZoneInfo("Asia/Shanghai")
 CN_INDICES = {
@@ -27,13 +28,16 @@ def context_quality_matrix(context: dict) -> dict:
     """Keep coverage, sample scope and source-time quality separate."""
     indices = context.get("indices") or []
     holdings = context.get("holdings") or []
-    fresh_holdings = [q for q in holdings if q.get("quality") == "FRESH"]
+    planning = context.get("phase") == "PREMARKET"
+    usable = {"FRESH", "PREVIOUS_CLOSE"} if planning else {"FRESH"}
+    fresh_holdings = [q for q in holdings if q.get("quality") in usable]
     tech = context.get("global_tech") or []
     candidate = context.get("candidate_breadth") or {}
     trade_date = context.get("trade_date")
     candidate_date = candidate.get("snapshot_date")
     return {
         "indices": {"fresh": sum(q.get("quality") == "FRESH" for q in indices),
+                    "usable_for_planning": sum(q.get("quality") in usable for q in indices),
                     "total": len(indices), "scope": "major_indices"},
         "market_breadth": {"quality": "MISSING", "scope": "whole_market",
                            "reason": "NO_WHOLE_MARKET_FEED"},
@@ -45,6 +49,7 @@ def context_quality_matrix(context: dict) -> dict:
             "sample_size": candidate.get("sample_size"),
         },
         "holdings": {"fresh": sum(q.get("quality") == "FRESH" for q in holdings),
+                     "usable_for_planning": len(fresh_holdings),
                      "total": len(holdings), "scope": "current_holdings"},
         "holding_breadth": {
             "scope": "current_holdings_count_not_market_wide",
@@ -57,6 +62,7 @@ def context_quality_matrix(context: dict) -> dict:
         "industry_exposure": {"quality": "MISSING",
                               "reason": "NO_VERIFIED_SECTOR_MAPPING"},
         "global_tech": {"source_time_verified": sum(bool(q.get("source_asof")) for q in tech),
+                        "dated_reference": sum(q.get("quality") == "DATED_REFERENCE" for q in tech),
                         "total": len(tech),
                         "fresh": sum(q.get("quality") == "FRESH" for q in tech),
                         "scope": "selected_global_technology"},
@@ -65,7 +71,8 @@ def context_quality_matrix(context: dict) -> dict:
     }
 
 
-def _quote(row: dict | None, label: str, *, collected_at: datetime, phase: str) -> dict:
+def _quote(row: dict | None, label: str, *, collected_at: datetime, phase: str,
+           market: str = "CN") -> dict:
     if not row:
         return {"name": label, "quality": "MISSING"}
     raw_asof = row.get("source_asof")
@@ -76,18 +83,37 @@ def _quote(row: dict | None, label: str, *, collected_at: datetime, phase: str) 
     quality = "SOURCE_TIME_UNKNOWN"
     if source_asof:
         age = (collected_at - source_asof).total_seconds()
-        if phase in {"INTRADAY", "AUCTION"}:
+        if age < -30:
+            quality = "FUTURE_TIMESTAMP"
+        elif phase in {"INTRADAY", "AUCTION"}:
             quality = "FRESH" if -30 <= age <= 120 else "STALE"
         elif source_asof.date() == collected_at.date():
             quality = "TODAY_QUOTE"
-        elif timedelta(0) <= collected_at - source_asof <= timedelta(days=4):
+        elif (source_asof.date() == previous_confirmed_cn_trading_day(collected_at.date())
+              and source_asof.hour >= 15):
             quality = "PREVIOUS_CLOSE"
         else:
             quality = "STALE"
+    raw_time = row.get("source_time_raw")
+    source_session_date = None
+    if market == "US" and raw_time:
+        try:
+            # Preserve the vendor's native session date. Its timezone is not
+            # documented in this adapter, so never manufacture a UTC timestamp.
+            native = datetime.strptime(raw_time, "%Y-%m-%d %H:%M:%S")
+            source_session_date = native.date().isoformat()
+            age_days = (collected_at.date() - native.date()).days
+            if 1 <= age_days <= 4:
+                quality = "DATED_REFERENCE"
+        except (TypeError, ValueError):
+            pass
     return {
         "name": label, "symbol": row.get("symbol"),
         "price": row.get("current_price"), "change_pct": row.get("change_pct"),
         "prev_close": row.get("prev_close"),
+        "high_price": row.get("high_price"), "low_price": row.get("low_price"),
+        "source_time_raw": raw_time, "source_session_date": source_session_date,
+        "timezone_status": "UNVERIFIED" if market == "US" else "Asia/Shanghai",
         "source": "tencent_quote", "source_asof": source_asof.isoformat() if source_asof else None,
         "quality": quality,
     }
@@ -111,7 +137,7 @@ async def collect_market_context(
     indices = [_quote(by_symbol.get(key), label, collected_at=observed, phase=phase)
                for key, label in zip(index_keys, CN_INDICES.values())]
     tech_keys = (".IXIC", ".INX", "NVDA", "AMD", "TSM")
-    tech = [_quote(by_symbol.get(key), label, collected_at=observed, phase=phase)
+    tech = [_quote(by_symbol.get(key), label, collected_at=observed, phase=phase, market="US")
             for key, label in zip(tech_keys, GLOBAL_TECH.values())]
     holdings = [_quote(by_symbol.get(symbol), symbol, collected_at=observed, phase=phase)
                 for symbol in symbols]
@@ -132,8 +158,9 @@ async def collect_market_context(
                        "turnover": b.turnover, "quality": "FETCH_TIME_ONLY"} for b in found]
         except Exception:
             pass
-    fresh_indices = sum(q["quality"] == "FRESH" for q in indices)
-    up = sum((q.get("change_pct") or 0) > 0 for q in indices if q["quality"] == "FRESH")
+    usable = {"PREVIOUS_CLOSE"} if phase == "PREMARKET" else {"FRESH"}
+    fresh_indices = sum(q["quality"] in usable for q in indices)
+    up = sum((q.get("change_pct") or 0) > 0 for q in indices if q["quality"] in usable)
     risk_tone = ("RISK_ON" if fresh_indices >= 3 and up >= 3 else
                  "RISK_OFF" if fresh_indices >= 3 and up <= 1 else "UNVERIFIED")
     result = {
@@ -145,7 +172,10 @@ async def collect_market_context(
         "candidate_breadth": sample,
         "global_tech": tech, "boards": boards, "holdings": holdings,
         "risk_tone": risk_tone,
-        "limits": ["US source timestamps are unavailable; do not claim fresh global resonance.",
+        "previous_cn_session": (previous_confirmed_cn_trading_day(observed.date()).isoformat()
+                                if previous_confirmed_cn_trading_day(observed.date()) else None),
+        "risk_tone_basis": "PREVIOUS_CN_CLOSE" if phase == "PREMARKET" else "CURRENT_QUOTES",
+        "limits": ["US native session dates are reference-only; timezone is unverified, not live resonance.",
                    "Candidate breadth is not whole-market breadth.",
                    "Board rankings have fetch time only; confirm at individual quote time."],
     }

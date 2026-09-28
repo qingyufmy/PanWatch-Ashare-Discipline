@@ -288,6 +288,7 @@ export default function OpportunitiesPage() {
     setError('')
     try {
       const req = {
+        snapshot_date: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()),
         status: 'active' as const,
         source_pool: source,
         holding,
@@ -321,7 +322,7 @@ export default function OpportunitiesPage() {
             status: 'active',
             min_score: req.min_score,
             limit: req.limit,
-            snapshot_date: '',
+            snapshot_date: req.snapshot_date,
             source: source === 'all' ? 'all' : source,
             holding: req.holding,
             timeoutMs: 90000,
@@ -528,7 +529,7 @@ export default function OpportunitiesPage() {
             机会页
           </h1>
           <p className="text-[12px] text-muted-foreground mt-1">
-            市场池优先，候选必须具备可执行入场计划
+            仅展示当日研究候选；价位预案仍须盘中行情与交易门禁确认
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -548,10 +549,10 @@ export default function OpportunitiesPage() {
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         <div className="card p-3">
-          <div className="text-[11px] text-muted-foreground">当前候选(全局)</div>
+          <div className="text-[11px] text-muted-foreground">最近候选统计（可含历史快照）</div>
           <div className="text-[18px] font-bold mt-1">{globalCoverage?.total_signals ?? '--'}</div>
           <div className="text-[10px] text-muted-foreground mt-1">
-            可执行: {globalCoverage?.active_signals ?? '--'}，观察: {(globalCoverage?.total_signals != null && globalCoverage?.active_signals != null) ? Math.max(0, globalCoverage.total_signals - globalCoverage.active_signals) : '--'}
+            活跃候选: {globalCoverage?.active_signals ?? '--'}，观察: {(globalCoverage?.total_signals != null && globalCoverage?.active_signals != null) ? Math.max(0, globalCoverage.total_signals - globalCoverage.active_signals) : '--'}
           </div>
         </div>
         <div className="card p-3">

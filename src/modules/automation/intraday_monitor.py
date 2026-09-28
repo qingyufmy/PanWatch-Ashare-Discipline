@@ -677,7 +677,7 @@ class IntradayMonitorAgent(BaseAgent):
         constraints = symbol_ctx.get("constraints") or {}
         if constraints:
             lines.append(
-                f"- 单票仓位占比：{safe_num(constraints.get('single_position_ratio'), 0) * 100:.1f}%（{constraints.get('risk_budget_hint', 'normal')}）"
+                f"- 单票估算仓位：{constraints.get('single_position_ratio_text', '待核查')}"
             )
         memory = symbol_ctx.get("memory") or {}
         if memory:

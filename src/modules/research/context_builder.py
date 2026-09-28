@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, datetime, timedelta
 
 from src.platform.marketdata.collectors.events_collector import fetch_announcement_fulltext
@@ -19,7 +20,7 @@ from src.modules.market.news_ranker import (
 )
 from src.platform.marketdata.models import MarketCode
 from src.platform.persistence.database import SessionLocal
-from src.platform.persistence.models import AnalysisHistory
+from src.platform.persistence.models import AnalysisHistory, AppSettings
 from src.platform.persistence.json_safe import to_jsonable
 
 logger = logging.getLogger(__name__)
@@ -148,7 +149,7 @@ class ContextBuilder:
             db.close()
 
     @staticmethod
-    def _build_portfolio_constraints(portfolio, symbol: str) -> dict:
+    def _build_portfolio_constraints(portfolio, symbol: str, *, mark_price=None, declared_nav=None) -> dict:
         agg = None
         try:
             agg = portfolio.get_aggregated_position(symbol)
@@ -159,9 +160,18 @@ class ContextBuilder:
         total_funds = float(getattr(portfolio, "total_available_funds", 0) or 0)
         total_cost = float(getattr(portfolio, "total_cost", 0) or 0)
 
-        single_position_ratio = 0.0
+        cost_allocation_ratio = None
         if agg and total_cost > 0:
-            single_position_ratio = float(agg.get("total_cost") or 0) / total_cost
+            cost_allocation_ratio = float(agg.get("total_cost") or 0) / total_cost
+        single_position_ratio = None
+        try:
+            price, nav = float(mark_price), float(declared_nav)
+            market = agg.get("market") if agg else None
+            if (agg and market in {MarketCode.CN, "CN"} and math.isfinite(price)
+                    and math.isfinite(nav) and price > 0 and nav > 0):
+                single_position_ratio = price * int(agg["total_quantity"]) / nav
+        except (TypeError, ValueError, KeyError):
+            pass
 
         safe_position = {}
         if isinstance(agg, dict):
@@ -199,8 +209,11 @@ class ContextBuilder:
             "total_available_funds": total_funds,
             "total_cost": total_cost,
             "account_count": len(accounts),
-            "single_position_ratio": round(single_position_ratio, 4),
-            "risk_budget_hint": "strict"
+            "cost_allocation_ratio": cost_allocation_ratio,
+            "single_position_ratio": round(single_position_ratio, 4) if single_position_ratio is not None else None,
+            "single_position_ratio_text": (f"{single_position_ratio * 100:.1f}%（报价市值/用户声明总资产，未券商核对，需复核报价时效）"
+                                           if single_position_ratio is not None else "待核查（缺市值或总资产；成本占比不代表仓位）"),
+            "risk_budget_hint": "unknown" if single_position_ratio is None else "strict"
             if single_position_ratio >= 0.35
             else "normal"
             if single_position_ratio >= 0.2
@@ -438,6 +451,9 @@ class ContextBuilder:
         symbol_contexts: dict[str, dict] = {}
         all_news_for_topic: list[dict] = []
         snapshot_date = _iso_today()
+        with SessionLocal() as db:
+            nav_setting = db.query(AppSettings).filter_by(key="portfolio_declared_nav_cny").first()
+            declared_nav = nav_setting.value if nav_setting else None
 
         for stock in context.watchlist:
             symbol = stock.symbol
@@ -456,7 +472,9 @@ class ContextBuilder:
 
             hist_topic = summarize_news_topics(hist_ranked)
             kline_history = self._get_kline_history(symbol, market, kline_days)
-            constraints = self._build_portfolio_constraints(context.portfolio, symbol)
+            constraints = self._build_portfolio_constraints(context.portfolio, symbol,
+                mark_price=getattr(pack.quote, "current_price", None) if pack and pack.quote else None,
+                declared_nav=declared_nav)
             snapshot_memory = self._build_snapshot_memory(
                 symbol=symbol,
                 market=market,

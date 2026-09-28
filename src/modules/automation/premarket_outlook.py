@@ -25,6 +25,7 @@ from src.modules.research.signals.structured_output import (
 )
 from src.platform.observability.log_context import get_log_context
 from src.platform.marketdata.models import MarketCode
+from src.platform.scheduling.trading_calendar import previous_confirmed_cn_trading_day
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +64,14 @@ class PremarketOutlookAgent(BaseAgent):
         )
 
         # 1. 获取昨日盘后分析
+        prior_session = previous_confirmed_cn_trading_day(date.today())
         yesterday_analysis = get_latest_analysis(
             agent_name="daily_report",
             stock_symbol="*",
-            before_date=date.today(),
-        )
+            before_date=prior_session + timedelta(days=1),
+        ) if prior_session else None
+        if yesterday_analysis and yesterday_analysis.analysis_date != prior_session.isoformat():
+            yesterday_analysis = None
         logger.info(
             "[%s] 昨日盘后回顾: exists=%s content_chars=%s",
             trace_id,
@@ -473,7 +477,7 @@ class PremarketOutlookAgent(BaseAgent):
             constraints = stock_ctx.get("constraints") or {}
             if constraints:
                 lines.append(
-                    f"- 资金约束：总可用 {safe_num(constraints.get('total_available_funds'), 0):.0f}，单票仓位占比 {safe_num(constraints.get('single_position_ratio'), 0) * 100:.1f}%（{constraints.get('risk_budget_hint', 'normal')}）"
+                    f"- 资金约束：账面可用 {safe_num(constraints.get('total_available_funds'), 0):.0f}，单票估算仓位 {constraints.get('single_position_ratio_text', '待核查')}"
                 )
             memory = stock_ctx.get("memory") or {}
             if memory:

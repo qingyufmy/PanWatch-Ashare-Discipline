@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from src.modules.portfolio.daily_workflow import FIXED_STEPS
+from src.modules.portfolio.premarket_briefing import briefing_for_plan
 from src.platform.scheduling.trading_calendar import confirmed_cn_trading_day
 from src.platform.persistence.database import get_db
 from src.platform.persistence.models import (
@@ -51,6 +52,7 @@ def plans(trade_date: str | None = None, limit: int = 30, db: Session = Depends(
              "status": r.status, "truth_snapshot_id": r.truth_snapshot_id,
              "macro_evidence_snapshot_id": r.macro_evidence_snapshot_id,
              "market_context": macro[r.id].payload if macro[r.id] else None,
+             "preparation": briefing_for_plan(db, r, macro[r.id].payload if macro[r.id] else {}),
              "model_run_id": r.model_run_id, "prompt_id": r.prompt_id,
              "prompt_version": r.prompt_version, "input_hash": r.input_hash,
              "output_hash": r.output_hash, "payload": r.payload,

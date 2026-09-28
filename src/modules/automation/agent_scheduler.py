@@ -16,7 +16,6 @@ from src.platform.scheduling.schedule_parser import parse_schedule
 from src.platform.scheduling.trading_calendar import confirmed_cn_trading_day
 
 logger = logging.getLogger(__name__)
-CN_CLOSE_OR_PREMARKET_AGENTS = frozenset({"daily_report", "premarket_outlook"})
 
 
 class AgentScheduler:
@@ -77,15 +76,20 @@ class AgentScheduler:
             logger.error(f"Agent 未找到: {agent_name}")
             return
 
-        if agent_name in CN_CLOSE_OR_PREMARKET_AGENTS:
-            day = datetime.now(ZoneInfo("Asia/Shanghai")).date()
-            session = confirmed_cn_trading_day(day)
-            if session is not True:
-                reason = "NON_TRADING_DAY" if session is False else "CALENDAR_UNVERIFIED"
-                logger.info("[调度] 跳过 %s：%s (%s)", agent.display_name, reason, day)
-                record_agent_run(agent_name=agent_name, status="skipped",
-                                 result=reason, trigger_source="schedule")
-                return
+        day = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        session = confirmed_cn_trading_day(day)
+        if session is not True:
+            reason = "NON_TRADING_DAY" if session is False else "CALENDAR_UNVERIFIED"
+            logger.info("[调度] 跳过 %s：%s (%s)", agent.display_name, reason, day)
+            record_agent_run(agent_name=agent_name, status="skipped",
+                             result=reason, trigger_source="schedule")
+            return
+
+        replaced = {"premarket_outlook": "portfolio_PREMARKET_PLAN", "daily_report": "portfolio_DAILY_REVIEW"}
+        if agent_name in replaced and self.scheduler.get_job(replaced[agent_name]) is not None:
+            record_agent_run(agent_name=agent_name, status="skipped",
+                             result="SUPERSEDED_BY_PORTFOLIO_WORKFLOW", trigger_source="schedule")
+            return
 
         start = time.monotonic()
         trace_id = f"sch-{agent_name}-{int(time.time() * 1000)}"

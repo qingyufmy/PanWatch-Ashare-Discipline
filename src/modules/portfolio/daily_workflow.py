@@ -31,6 +31,7 @@ from src.modules.portfolio.decision_router import record_position_decision
 from src.modules.portfolio.risk_observation import record_shadow_risk_observations
 from src.modules.portfolio.model_router import probe_role
 from src.modules.portfolio.market_context import collect_market_context
+from src.modules.portfolio.premarket_briefing import build_briefing, briefing_for_plan
 from src.modules.portfolio.prompt_registry import run_portfolio_prompt
 from src.modules.portfolio.signal_journal import record_signal
 from src.modules.portfolio.policy_gate import evaluate_signal
@@ -377,14 +378,20 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None,
         db.commit()
         macro_id = macro.id
         macro_captured_at = macro.captured_at
+    preparation = build_briefing(market=market, positions=positions, limits=limits,
+                                nav=truth.nav, truth_source=truth.source)
     evidence = {"portfolio_truth_status": truth.truth_status,
-                "market_data_status": "PREMARKET_UNVERIFIED",
+                "phase": "PREMARKET_CONDITIONAL_PLANNING",
+                "market_data_status": "PREVIOUS_SESSION_REFERENCE_NOT_LIVE",
                 "truth_snapshot_id": truth_id,
                 "macro_evidence_snapshot_id": macro_id,
                 "market_context": market,
                 "paper_account": paper_state,
-                "position_limits": limits}
+                "position_limits": limits, "preparation": preparation,
+                "planning_note": "上一确认交易日收盘是盘前有效基准，不因尚无今日竞价而一律作废。评估条件预案与建议仓位；成交仍需盘中新信号。请用简体中文解释。"}
     payload = {"trade_date": day, "positions": positions, "evidence": evidence}
+    proposal = model = None
+    model_error = None
     try:
         proposal, model = await run_portfolio_prompt("flash", payload, db_factory=db_factory)
     except Exception as exc:
@@ -392,18 +399,22 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None,
             record_issue(db, category="MODEL_SCHEMA_ERROR" if isinstance(exc, ValueError) else "MODEL_TIMEOUT",
                          code=type(exc).__name__, source="premarket_plan",
                          title="Portfolio batch proposal failed", context={"detail": str(exc)[:150]})
-        return _status("BATCH_MODEL_FAILED", error=type(exc).__name__)
-    frozen = proposal.model_dump(mode="json")
+        model_error = type(exc).__name__
+    frozen = proposal.model_dump(mode="json") if proposal else {
+        "trade_date": day, "proposals": [], "portfolio_rationale": "模型失败；仅提供已核对基准的规则条件预案。"}
+    frozen["preparation"] = preparation
+    frozen["model_status"] = "OK" if model else "MODEL_FAILED"
+    preparation["model_status"] = frozen["model_status"]
     with db_factory() as db:
-        model_run = db.get(ModelRun, model.run_id)
+        model_run = db.get(ModelRun, model.run_id) if model else None
         prompt_version = model_run.prompt_version if model_run else None
         decision_at = _decision_clock(model_run, observed_at=decision_clock() if decision_clock else None,
-                                      evidence_available_at=macro_captured_at)
+                                      evidence_available_at=macro_captured_at) if model else datetime.now(timezone.utc)
         existing = db.query(DailyPortfolioPlan).filter_by(trade_date=day).order_by(DailyPortfolioPlan.version.desc()).first()
         version = (existing.version + 1) if existing else 1
         plan = DailyPortfolioPlan(trade_date=day, version=version, status="REVIEW_ONLY",
                                   truth_snapshot_id=truth_id, macro_evidence_snapshot_id=macro_id,
-                                  model_run_id=model.run_id,
+                                  model_run_id=model.run_id if model else None,
                                   prompt_id="flash", prompt_version=prompt_version,
                                   input_hash=logical_hash(payload), output_hash=logical_hash(frozen),
                                   payload=frozen)
@@ -411,7 +422,7 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None,
         db.flush()
         signal_ids = []
         signals = []
-        for action in proposal.proposals:
+        for action in proposal.proposals if proposal else []:
             evidence_payload = {"schema_valid": True, "model_conflict": False,
                                 "scheduled_at": now.isoformat() if now else None,
                                 "model_finished_at": model_run.finished_at.isoformat(),
@@ -437,17 +448,17 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None,
                 record_position_decision(db, signal, now=decision_at)
             signal_ids.append(signal.signal_id)
             signals.append(signal)
-        title, content = render_premarket_plan(proposal.proposals, signals, positions)
+        title, content = render_premarket_plan(proposal.proposals if proposal else [], signals, positions, preparation)
         notice, _ = enqueue_portfolio_notice(
             db, key=f"plan:{day}:{version}", title=title, content=content,
             trade_date=day, signal_ids=signal_ids, reason="PREMARKET_PLAN",
         )
         notice_id = notice.id
         db.commit()
-        result = {"status": "REVIEW", "reason": "USER_ATTESTED_AND_PREMARKET_DATA_UNVERIFIED",
+        result = {"status": "REVIEW", "reason": "MODEL_FAILED_RULE_PREPARATION" if model_error else "CONDITIONAL_PREPARATION_REQUIRES_INTRADAY_CONFIRMATION",
                   "daily_plan_id": plan.id, "daily_plan_version": version,
-                  "model_run_id": model.run_id, "macro_evidence_snapshot_id": macro_id,
-                  "coverage": len(proposal.proposals),
+                  "model_run_id": model.run_id if model else None, "macro_evidence_snapshot_id": macro_id,
+                  "coverage": len(positions), "model_error": model_error,
                   "signal_ids": signal_ids}
     result["notification"] = await dispatch_portfolio_notice(
         notice_id, db_factory=db_factory, timeout_seconds=12)
@@ -460,6 +471,11 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str,
     with db_factory() as db:
         truth = _ensure_today_truth(db, day)
         positions = _positions(truth)
+        daily_plan = (db.query(DailyPortfolioPlan).filter_by(trade_date=day)
+                      .order_by(DailyPortfolioPlan.version.desc()).first())
+        plan_evidence = db.get(EvidenceSnapshot, daily_plan.macro_evidence_snapshot_id) if daily_plan and daily_plan.macro_evidence_snapshot_id else None
+        preparation = briefing_for_plan(db, daily_plan, plan_evidence.payload if plan_evidence else {}) if daily_plan else None
+        daily_plan_id = daily_plan.id if daily_plan else None
     if not positions:
         return _status("TRUTH_SNAPSHOT_MISSING", coverage=0)
     with db_factory() as db:
@@ -498,6 +514,7 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str,
                        risk_observation_ids=shadow_ids)
     payload = {"trade_date": day, "positions": positions,
                "evidence": {"phase": phase, "truth_snapshot_id": truth.id,
+                            "daily_plan_id": daily_plan_id, "premarket_preparation": preparation,
                             "macro_evidence_snapshot_id": macro_id,
                             "auction_evidence_snapshot_id": auction_id,
                             "market_context": market,
@@ -751,7 +768,7 @@ async def run_step(step: str, *, now: datetime | None = None,
     day = moment.date().isoformat()
     slot = moment.strftime("%H:%M") if step in {"HARD_RISK", "FEATURE_REFRESH"} else "DAILY"
     calendar_ok = calendar_check(moment.date()) if calendar_check else (
-        trading_calendar._CN_TRADING_DATES is not None and trading_calendar.is_trading_day("CN", moment.date())
+        trading_calendar.confirmed_cn_trading_day(moment.date())
     )
     with db_factory() as db:
         existing = db.query(PortfolioWorkflowRun).filter_by(trade_date=day, step=step, slot=slot).first()
@@ -771,7 +788,7 @@ async def run_step(step: str, *, now: datetime | None = None,
             return {"run_id": winner.run_id, "status": winner.status, **(winner.payload or {})}
         run_id = run.run_id
     if not calendar_ok:
-        unknown = calendar_check is None and trading_calendar._CN_TRADING_DATES is None
+        unknown = calendar_ok is None
         result = {"status": "REVIEW" if unknown else "SKIPPED",
                   "reason": "CALENDAR_UNVERIFIED" if unknown else "NON_TRADING_DAY"}
         if unknown:
@@ -836,12 +853,12 @@ def recover_missed(*, now: datetime | None = None, db_factory=SessionLocal,
             db.add(activation)
             db.commit()
         start = datetime.fromisoformat(activation.payload["activated_at"]).astimezone(SH)
-        if calendar_check is None and trading_calendar._CN_TRADING_DATES is None:
+        if calendar_check is None and trading_calendar.confirmed_cn_trading_day(moment.date()) is None:
             record_issue(db, category="DATA_MISSING", code="CALENDAR_UNVERIFIED", source="trading_calendar",
                          title="Portfolio workflow trading calendar unavailable",
                          context={"trade_date": moment.date().isoformat()})
             return {"missed": 0, "reason": "CALENDAR_UNVERIFIED"}
-        if not (calendar_check(moment.date()) if calendar_check else trading_calendar.is_trading_day("CN", moment.date())):
+        if not (calendar_check(moment.date()) if calendar_check else trading_calendar.confirmed_cn_trading_day(moment.date())):
             return {"missed": 0, "reason": "NON_TRADING_DAY"}
         stale_running = (db.query(PortfolioWorkflowRun)
                          .filter_by(trade_date=moment.date().isoformat(), status="RUNNING")

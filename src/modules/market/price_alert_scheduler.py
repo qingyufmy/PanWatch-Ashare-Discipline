@@ -8,6 +8,7 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.modules.market.price_alert_engine import ENGINE
+from src.platform.scheduling.trading_calendar import cn_business_day
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,8 @@ class PriceAlertScheduler:
         self._running = False
 
     async def _scan_job(self):
+        if not cn_business_day():
+            return
         if self._running:
             logger.debug("[价格提醒] 上轮扫描仍在执行，跳过本轮")
             return

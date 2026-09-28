@@ -8,7 +8,7 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.modules.paper_trading.paper_trading_engine import ENGINE
-from src.platform.scheduling.trading_calendar import any_market_trading_day
+from src.platform.scheduling.trading_calendar import cn_business_day
 from src.platform.marketdata.models import MARKETS, MarketCode
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,8 @@ class PaperTradingScheduler:
         self._running = False
 
     async def _scan_job(self):
+        if not cn_business_day():
+            return
         if self._running:
             logger.debug("[模拟盘] 上轮扫描仍在执行，跳过本轮")
             return
@@ -58,7 +60,7 @@ class PaperTradingScheduler:
 
     async def _premarket_job(self):
         """盘前计划通知。非交易日(周末/节假日)跳过。"""
-        if not any_market_trading_day():
+        if not cn_business_day():
             logger.debug("[模拟盘] 非交易日,跳过盘前计划通知")
             return
         # The legacy notifier reports StrategySignalRun candidates, which do not
@@ -76,7 +78,7 @@ class PaperTradingScheduler:
 
     async def _summary_job(self):
         """日终摘要通知。非交易日(周末/节假日)跳过。"""
-        if not any_market_trading_day():
+        if not cn_business_day():
             logger.debug("[模拟盘] 非交易日,跳过日终摘要通知")
             return
         try:
@@ -86,6 +88,8 @@ class PaperTradingScheduler:
             logger.exception(f"[模拟盘] 日终摘要通知异常: {e}")
 
     async def _portfolio_nav_job(self):
+        if not cn_business_day():
+            return
         from src.modules.paper_trading.portfolio_paper import capture_paper_nav, paper_mode
         from src.platform.persistence.database import SessionLocal
         from src.platform.persistence.models import PaperTradingAccount

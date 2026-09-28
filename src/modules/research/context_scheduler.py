@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from src.platform.scheduling.trading_calendar import cn_business_day
 
 from src.platform.marketdata.collectors.kline_collector import kline_source
 from src.modules.research.context_store import cleanup_context_data
@@ -38,6 +39,8 @@ class ContextMaintenanceScheduler:
         self._refreshing = False
 
     async def _evaluate_job(self):
+        if not cn_business_day():
+            return
         if self._evaluating:
             logger.debug("[上下文维护] 上一轮后验评估仍在执行，跳过本轮")
             return
@@ -187,9 +190,7 @@ class ContextMaintenanceScheduler:
 
     async def _refresh_opportunities_job(self):
         """定时刷新机会池（候选 + 策略信号）。全市场休市日跳过。"""
-        from src.platform.scheduling.trading_calendar import any_market_trading_day
-
-        if not any_market_trading_day():
+        if not cn_business_day():
             logger.debug("[上下文维护] 非交易日，跳过机会刷新")
             return
         if self._refreshing:

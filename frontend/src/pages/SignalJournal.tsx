@@ -3,6 +3,7 @@ import { fetchAPI } from '@panwatch/api/client'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Input } from '@panwatch/base-ui/components/ui/input'
 import { useToast } from '@panwatch/base-ui/components/ui/toast'
+import { PremarketPreparation, type Preparation } from '@/components/PremarketPreparation'
 
 type Signal = {
   signal_id: string
@@ -32,6 +33,7 @@ type SignalDetail = Signal & {
   lifecycle: Array<{ to_status: string; reason: string; occurred_at: string }>
 }
 type DailyPlan = {
+  preparation?: Preparation | null
   id: number
   trade_date: string
   version: number
@@ -171,15 +173,16 @@ export default function SignalJournalPage() {
         </div>
         {dailyPlan ? (
           <>
-            <p className="text-sm">盘前计划 v{dailyPlan.version} · {dailyPlan.status} · 覆盖 {dailyPlan.payload.proposals.length} 只持仓</p>
+            <p className="text-sm">盘前条件预案 v{dailyPlan.version} · 待盘中确认 · 覆盖 {dailyPlan.preparation?.positions.length ?? dailyPlan.payload.proposals.length} 只持仓</p>
+            {dailyPlan.preparation && <PremarketPreparation plan={dailyPlan.preparation} />}
             {dailyPlan.market_context && <div className="rounded-lg border p-3 text-xs space-y-1">
               <p>指数：{dailyPlan.market_context.indices.map(item => `${item.name} ${item.change_pct == null ? '无数据' : `${item.change_pct.toFixed(2)}%`} (${item.quality})`).join(' · ')}</p>
               <p>情绪样本：{dailyPlan.market_context.candidate_breadth.regime || '未知'} · 上涨占比 {dailyPlan.market_context.candidate_breadth.breadth_up_pct?.toFixed(1) ?? '—'}% · 样本 {dailyPlan.market_context.candidate_breadth.sample_size ?? '—'} 只；不是全市场统计。</p>
               <p>全球科技：{dailyPlan.market_context.global_tech.map(item => `${item.name} ${item.change_pct == null ? '无数据' : `${item.change_pct.toFixed(2)}%`} (${item.quality})`).join(' · ')}</p>
-              <p>盘中风险状态：{dailyPlan.market_context.risk_tone}。缺来源时刻的数据不得作为加仓确认。</p>
+              <p>原始市场状态：{dailyPlan.market_context.risk_tone}。盘前参考上一交易日收盘；盘中加仓仍需新行情确认。</p>
             </div>}
-            {dailyPlan.payload.portfolio_rationale && <p className="text-sm">组合仓位判断：{dailyPlan.payload.portfolio_rationale}</p>}
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {dailyPlan.payload.portfolio_rationale && <details className="text-sm"><summary className="cursor-pointer">查看原模型分析</summary><p className="mt-2">{dailyPlan.payload.portfolio_rationale}</p></details>}
+            {!dailyPlan.preparation && <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
               {dailyPlan.payload.proposals.map(item => (
                 <div key={item.symbol} className="rounded-lg border px-3 py-2 text-sm">
                   <div className="flex justify-between font-medium"><span>{item.symbol}</span><span>{item.action}</span></div>
@@ -188,7 +191,7 @@ export default function SignalJournalPage() {
                   <p className="mt-1 text-xs text-muted-foreground">模型方向待证据与 Policy 核对；模型提示数量不构成授权。</p>
                 </div>
               ))}
-            </div>
+            </div>}
           </>
         ) : <p className="text-sm text-muted-foreground">今日盘前计划尚未生成；08:50 后刷新查看。若任务失败，请查看下方时间槽状态。</p>}
         {workflowRuns.length > 0 && <div className="flex flex-wrap gap-2 text-xs">

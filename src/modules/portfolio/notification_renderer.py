@@ -16,8 +16,28 @@ def _price(value) -> str | None:
     return f"{number:.2f}元" if math.isfinite(number) and number > 0 else None
 
 
-def render_premarket_plan(proposals, signals, positions) -> tuple[str, str]:
+def render_premarket_plan(proposals, signals, positions, preparation=None) -> tuple[str, str]:
     """Show directions, never model-suggested shares or unverified prices."""
+    if preparation:
+        p = preparation
+        exposure = p["exposure"]
+        pct = lambda value: "待核查" if value is None else f"{value * 100:.1f}%"
+        lines = [f"交易日 {p['trade_date']}｜收盘基准 {p['previous_cn_session'] or '待核实'}",
+                 p["market_summary"],
+                 "指数：" + "；".join(f"{q['name']} {q['change_pct']:+.2f}%" for q in p["index_facts"]),
+                 p["breadth_summary"], "全球科技：" + p["global_summary"],
+                 f"当前估算仓位 {pct(exposure['current_weight'])}；条件成立后的建议区间 "
+                 f"{pct(exposure['suggested_min'])}—{pct(exposure['suggested_max'])}。",
+                 exposure["basis"] + "。", exposure["rule"], "逐股预案："]
+        for row in p["positions"]:
+            lines.extend([f"{row['name']}（{row['symbol']}）｜{row['stance']}｜当前 {pct(row['current_weight'])} "
+                          f"→ 条件目标 {pct(row['conditional_target_weight'])}",
+                          "减仓观察：" + row["reduce_condition"], "加仓观察：" + row["add_condition"]])
+        lines.extend(p["checkpoints"])
+        if p.get("model_status") == "MODEL_FAILED":
+            lines.append("模型分析失败；本消息仅含规则生成的条件预案，未生成模型方向信号。")
+        lines.append(p["execution_boundary"])
+        return "盘前条件预案｜" + {"DEFENSIVE": "防守优先", "CONSTRUCTIVE": "观察增强", "MIXED": "分化观察"}.get(p["risk_tone"], "证据待补"), "\n".join(lines)
     by_symbol = {p["symbol"]: p for p in positions}
     by_signal = {s.symbol: s for s in signals}
     grouped = {action: [] for action in ACTION_ORDER}

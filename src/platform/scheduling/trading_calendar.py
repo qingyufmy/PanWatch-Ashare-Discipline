@@ -164,6 +164,18 @@ def next_confirmed_cn_trading_day(d: date) -> date | None:
     return min(candidates, default=None)
 
 
+def previous_confirmed_cn_trading_day(d: date) -> date | None:
+    """Previous session within the loaded calendar, including long holiday gaps."""
+    if confirmed_cn_trading_day(d) is None:
+        return None
+    return max((day for day in _CN_TRADING_DATES if day < d), default=None)
+
+
+def cn_business_day() -> bool:
+    """Local A-share automation requires a positively confirmed session."""
+    return confirmed_cn_trading_day(_now_in_market_tz(_to_market_code("CN")).date()) is True
+
+
 def any_market_trading_day(d: date | datetime | None = None) -> bool:
     """CN/HK/US 任一为交易日即 `True`。全市场休市(如周末)返回 `False`。"""
     from src.platform.marketdata.models import MarketCode

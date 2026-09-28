@@ -1,6 +1,7 @@
 """P7 simulated trading day, idempotency and missed-slot recovery."""
 
 import asyncio
+import pytest
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -105,7 +106,8 @@ def test_restart_records_missed_slots_without_backfilling_model_calls():
     engine.dispose()
 
 
-def test_batch_plan_creates_eleven_review_signals_with_daily_plan_link(monkeypatch):
+@pytest.mark.parametrize("model_fails", [False, True])
+def test_batch_plan_creates_eleven_review_signals_with_daily_plan_link(monkeypatch, model_fails):
     engine, factory = _db()
     with factory() as db:
         truth = PortfolioTruthSnapshot(
@@ -124,6 +126,9 @@ def test_batch_plan_creates_eleven_review_signals_with_daily_plan_link(monkeypat
 
     async def fake_prompt(prompt_id, payload, **kwargs):
         assert len(payload["positions"]) == 11
+        assert len(payload["evidence"]["preparation"]["positions"]) == 11
+        if model_fails:
+            raise TimeoutError("fixture model timeout")
         plan = PortfolioActionPlan.model_validate({
             "trade_date": payload["trade_date"],
             "portfolio_rationale": "Insufficient verified data",
@@ -158,7 +163,10 @@ def test_batch_plan_creates_eleven_review_signals_with_daily_plan_link(monkeypat
     with factory() as db:
         assert db.query(DailyPortfolioPlan).count() == 1
         signals = db.query(SignalEvent).all()
-        assert len(signals) == 11
+        assert len(signals) == (0 if model_fails else 11)
+        assert len(db.query(DailyPortfolioPlan).one().payload["preparation"]["positions"]) == 11
+        if model_fails:
+            assert result["reason"] == "MODEL_FAILED_RULE_PREPARATION"
         assert all(s.daily_plan_version == 1 and s.status == "REVIEW_REQUIRED" for s in signals)
         assert all(s.generated_at >= datetime(2026, 9, 23, 0, 50, 30) for s in signals)
     engine.dispose()

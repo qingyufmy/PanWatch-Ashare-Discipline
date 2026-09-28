@@ -1,5 +1,13 @@
 # 本地持仓系统运行手册
 
+## 非交易日与盘前语义（2026-09-28 更新）
+
+本地自动分析、机会扫描、模拟盘与价格警报只在确认的中国交易日进入业务；未知日历停止业务。服务守护、日历更新和日志维护可以继续。Portfolio 工作流已注册时，旧 premarket_outlook/daily_report 定时入口记 SUPERSEDED_BY_PORTFOLIO_WORKFLOW 后退出，避免重复摘要。
+
+盘前使用上一确认交易日收盘形成条件预案，不能套用盘中实时行情时效规则；海外来源日期和未核实时区分开标注。`/discipline` 展示最新日计划的组合建议区间、逐股条件及失效条件。数字依据是声明总资产与持仓市值，不是成本占比或券商核对值。规则预案与模型信号分别留痕，模型失败不凭空生成信号。
+
+机会页默认只显示北京时间当日候选；候选 ID 关联到其他股票的历史策略结果被读取接口隔离。历史原件保留，不重跑历史信号。具体问题、修复提交与验收证据见 [2026-09-28 检查记录](../incidents/20260928/premarket_audit.md)。
+
 ## 启动与检查
 
 Windows 计划任务 `PanWatch Local Backend` 每日 08:00 至 22:00 每 5 分钟运行 `scripts/ensure-local-service.ps1`，服务监听 `127.0.0.1:8000`。先检查 `/health`，再登录核对 `/discipline` 的当日持仓计划、`/api/portfolio-workflow/schedule` 和当日 `/api/portfolio-workflow/runs`。健康接口只证明进程可访问，不证明交易日业务链通过。

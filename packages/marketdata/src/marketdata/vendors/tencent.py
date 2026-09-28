@@ -119,6 +119,9 @@ def fetch_raw(tencent_symbols: list[str]) -> list[dict]:
                 "volume": q.volume,
                 "turnover": q.turnover,
                 "source_asof": source_asof,
+                "source_time_raw": parts[30] if len(parts) > 30 else None,
+                "high_price": q.high_price,
+                "low_price": q.low_price,
             })
     return out
 

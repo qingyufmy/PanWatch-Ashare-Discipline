@@ -28,6 +28,16 @@ function formatCurrency(v: number) {
   return v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+const FILL_ACTIONS: Record<string, string> = { ADD: '买入 · 加仓', OPEN: '买入 · 建仓', REDUCE: '卖出 · 减仓', EXIT: '卖出 · 清仓' }
+function formatFillTime(value?: string) {
+  if (!value) return '未记录'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '时间待核对' : date.toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  })
+}
+
 function PnlText({ value, suffix = '' }: { value: number; suffix?: string }) {
   const color = value > 0 ? 'text-rose-500' : value < 0 ? 'text-emerald-500' : 'text-muted-foreground'
   const prefix = value > 0 ? '+' : ''
@@ -140,8 +150,8 @@ export default function PaperTradingPage() {
   const [notifySaving, setNotifySaving] = useState(false)
   const [notifyTesting, setNotifyTesting] = useState(false)
 
-  const loadData = useCallback(async () => {
-    setLoading(true)
+  const loadData = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true)
     try {
       const mkt = marketView === 'ALL' ? undefined : marketView
       const [acc, pos, tradeData, metrics, fills] = await Promise.all([
@@ -159,13 +169,17 @@ export default function PaperTradingPage() {
       setStrategyPerf(metrics.strategy_performance || [])
       setPortfolioFills(fills)
     } catch {
-      toast('加载失败', 'error')
+      if (!quiet) toast('加载失败', 'error')
     } finally {
-      setLoading(false)
+      if (!quiet) setLoading(false)
     }
   }, [tradesPage, marketView])
 
-  useEffect(() => { loadData() }, [loadData])
+  useEffect(() => {
+    loadData()
+    const timer = window.setInterval(() => { if (!document.hidden) loadData(true) }, 30000)
+    return () => window.clearInterval(timer)
+  }, [loadData])
 
   const handleToggle = async () => {
     if (!account) return
@@ -357,7 +371,7 @@ export default function PaperTradingPage() {
             <span className="hidden sm:inline">{scanning ? '扫描中...' : '立即扫描'}</span>
             <span className="sm:hidden">{scanning ? '扫描中' : '扫描'}</span>
           </Button>
-          <Button variant="outline" size="sm" className="h-8" onClick={loadData} disabled={loading}>
+          <Button variant="outline" size="sm" className="h-8" onClick={() => loadData()} disabled={loading}>
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             <span className="hidden sm:inline ml-1">刷新</span>
           </Button>
@@ -570,13 +584,24 @@ export default function PaperTradingPage() {
       {account?.paper_mode === 'PAPER_ONLY' && (
         <div className="card p-4">
           <h2 className="text-sm font-semibold mb-2">模拟成交记录 ({portfolioFills.length})</h2>
+          <p className="text-xs text-muted-foreground mb-3">北京时间 · 页面每30秒自动刷新。盘中批量分析生成建议，每分钟用当前行情检查模拟成交条件；同一扫描批次可能有多笔成交，成交时间相同。按末价模拟撮合，不代表逐笔委托成交。</p>
           {portfolioFills.length === 0 ? <p className="text-xs text-muted-foreground">尚无通过模拟门禁的成交信号。</p> : (
-            <div className="space-y-1 text-xs">
-              {portfolioFills.map(fill => <div key={fill.signal_id} className="flex flex-wrap gap-x-3 border-b border-border/50 py-1">
-                <span>{fill.filled_at}</span><span>{fill.symbol}</span><span>{fill.action}</span>
-                <span>{fill.quantity} 股 × {fill.price.toFixed(2)} 元</span>
-                <span>成本 {fill.fees.toFixed(2)} 元</span><span className="text-muted-foreground">PAPER_ONLY</span>
-              </div>)}
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs whitespace-nowrap">
+                <thead><tr className="border-b border-border text-left text-muted-foreground">
+                  {['股票', '买卖方向', '成交数量', '模拟成交价', '交易费用', '信号生成时间', '行情来源时间', '模拟成交时间'].map(label => <th key={label} className="px-3 py-2 font-medium">{label}</th>)}
+                </tr></thead>
+                <tbody>{portfolioFills.map(fill => <tr key={fill.signal_id} className="border-b border-border/50">
+                  <td className="px-3 py-3"><div className="font-medium">{fill.stock_name || '名称待核对'}</div><div className="text-muted-foreground">{fill.symbol}</div></td>
+                  <td className="px-3 py-3"><span className={['ADD', 'OPEN'].includes(fill.action) ? 'text-rose-600' : 'text-emerald-600'}>{FILL_ACTIONS[fill.action] || '方向待核对'}</span><div className="text-muted-foreground">仅模拟盘</div></td>
+                  <td className="px-3 py-3">{fill.quantity.toLocaleString('zh-CN')} 股</td>
+                  <td className="px-3 py-3">{fill.price.toFixed(2)} 元</td>
+                  <td className="px-3 py-3" title="含手续费及滑点模型估算">{fill.fees.toFixed(2)} 元</td>
+                  <td className="px-3 py-3">{formatFillTime(fill.signal_generated_at)}</td>
+                  <td className="px-3 py-3">{formatFillTime(fill.quote_asof)}</td>
+                  <td className="px-3 py-3">{formatFillTime(fill.filled_at)}</td>
+                </tr>)}</tbody>
+              </table>
             </div>
           )}
         </div>

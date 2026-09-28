@@ -62,6 +62,8 @@ export interface PaperPortfolioFillItem {
   signal_id: string
   trade_date: string
   symbol: string
+  stock_name?: string | null
+  signal_generated_at?: string
   action: string
   quantity: number
   price: number

@@ -29,6 +29,7 @@ from src.platform.persistence.models import (
     PaperTradingTrade,
     PaperPortfolioFill,
     PaperPortfolioNav,
+    SignalEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -436,13 +437,26 @@ def list_trades(limit: int = 50, offset: int = 0, market: str | None = None, db:
 
 @router.get("/portfolio-fills")
 def list_portfolio_fills(limit: int = 100, db: Session = Depends(get_db)):
-    rows = (db.query(PaperPortfolioFill).order_by(PaperPortfolioFill.filled_at.desc())
+    rows = (db.query(PaperPortfolioFill, SignalEvent.generated_at)
+            .outerjoin(SignalEvent, SignalEvent.signal_id == PaperPortfolioFill.signal_id)
+            .order_by(PaperPortfolioFill.filled_at.desc(), PaperPortfolioFill.symbol.asc())
             .limit(max(1, min(limit, 300))).all())
+    symbols = {row.symbol for row, _ in rows}
+    names = {}
+    if symbols:
+        for position in (db.query(PaperTradingPosition)
+                         .filter(PaperTradingPosition.stock_market == "CN",
+                                 PaperTradingPosition.stock_symbol.in_(symbols))
+                         .order_by(PaperTradingPosition.id.desc())):
+            if position.stock_name:
+                names.setdefault(position.stock_symbol, position.stock_name)
     return [{"signal_id": r.signal_id, "trade_date": r.trade_date,
-             "symbol": r.symbol, "action": r.action, "quantity": r.quantity,
+             "symbol": r.symbol, "stock_name": names.get(r.symbol),
+             "signal_generated_at": _format_dt(generated_at),
+             "action": r.action, "quantity": r.quantity,
              "price": r.price, "fees": r.fees, "cash_delta": r.cash_delta,
              "quote_asof": _format_dt(r.quote_asof), "filled_at": _format_dt(r.filled_at),
-             "policy_scope": r.policy_scope, "details": r.details} for r in rows]
+             "policy_scope": r.policy_scope, "details": r.details} for r, generated_at in rows]
 
 
 @router.get("/metrics")

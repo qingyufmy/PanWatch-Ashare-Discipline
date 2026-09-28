@@ -15,6 +15,7 @@ import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Switch } from '@panwatch/base-ui/components/ui/switch'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@panwatch/base-ui/components/ui/dialog'
 import { useToast } from '@panwatch/base-ui/components/ui/toast'
+import IntradayRuntimeStatus from '@/components/IntradayRuntimeStatus'
 
 const EXIT_REASON_MAP: Record<string, string> = {
   stop_loss: '止损',
@@ -371,6 +372,7 @@ export default function PaperTradingPage() {
         </div>
       </div>
 
+      {account?.paper_mode === 'PAPER_ONLY' && <IntradayRuntimeStatus />}
       {account?.paper_mode === 'PAPER_ONLY' && account.baseline && (
         <div className="card p-3 text-xs text-muted-foreground">
           模拟收益起点：{account.baseline.trade_date}；持仓来自用户填报，价格来自 {account.baseline.quote_source}。

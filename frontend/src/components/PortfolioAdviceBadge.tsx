@@ -11,6 +11,8 @@ export interface PortfolioAdvice {
   expires_at: string
   source: string
   reason?: string
+  risk_kind?: string
+  proposed_qty?: number
 }
 
 interface DecisionHistory {
@@ -41,6 +43,7 @@ interface LegacySuggestion {
 
 const LABELS: Record<string, string> = {
   HOLD: '持有', ADD: '加仓', REDUCE: '减仓', EXIT: '退出', RISK_REVIEW: '风险复核', DATA_UNKNOWN: '待核查',
+  PROPOSAL_ADD: '加仓提案待确认', PROPOSAL_REDUCE: '减仓提案待确认', PROPOSAL_EXIT: '退出提案待确认',
 }
 
 function formatTime(value: string) {
@@ -81,7 +84,8 @@ export function PortfolioAdviceBadge({ advice, stockName, symbol, unavailable = 
   const active = advice && new Date(advice.expires_at).getTime() > Date.now() ? advice : null
   const closed = marketStatus === 'NON_TRADING_DAY'
   const marketOpen = marketStatus === 'TRADING_DAY'
-  const label = unavailable ? '建议不可用' : closed ? '休市' : !marketOpen ? '交易日待核查' : active ? (LABELS[active.action] || '待更新') : '待更新'
+  const riskLabels: Record<string, string> = { HARD_STOP: '触及观察价', CONFIRMED_SUPPORT_BREAK: '支撑破位待确认', RISK_OFF_DIRECTIONAL_REVIEW: '减仓方向待核查' }
+  const label = unavailable ? '建议不可用' : closed ? '休市' : !marketOpen ? '交易日待核查' : active ? (riskLabels[active.risk_kind || ''] || LABELS[active.action] || '待更新') : '待更新'
   const tone = marketOpen && (active?.action === 'RISK_REVIEW' || active?.action === 'EXIT') ? 'text-rose-700 border-rose-300 bg-rose-50'
     : marketOpen && active?.action === 'REDUCE' ? 'text-amber-700 border-amber-300 bg-amber-50'
     : marketOpen && active?.action === 'ADD' ? 'text-emerald-700 border-emerald-300 bg-emerald-50'
@@ -90,7 +94,7 @@ export function PortfolioAdviceBadge({ advice, stockName, symbol, unavailable = 
   return <>
     <button type="button" title="查看当前建议与历史" onClick={event => { event.stopPropagation(); setOpen(true) }}
       className={`rounded-md border px-2 py-0.5 text-[11px] font-medium ${tone}`}>
-      {active && marketOpen && !['RISK_REVIEW', 'DATA_UNKNOWN'].includes(active.action) ? `建议${label}` : label}
+      {active && marketOpen && ['HOLD', 'ADD', 'REDUCE', 'EXIT'].includes(active.action) ? `建议${label}` : label}
     </button>
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent className="max-w-lg max-h-[80vh] overflow-y-auto" onClick={event => event.stopPropagation()}>
@@ -101,6 +105,7 @@ export function PortfolioAdviceBadge({ advice, stockName, symbol, unavailable = 
             {active && marketOpen ? <>
               <div className="mt-1 text-xs text-muted-foreground">{formatTime(active.created_at)} 更新 · {active.source === 'hard_risk' ? '分钟风险监测' : active.source === 'shadow_risk' ? '影子风险观察' : '持仓工作流'} · {active.decision_status === 'APPROVED' ? '策略门禁通过' : '待人工确认'}</div>
               <div className="mt-2 text-xs">{active.reason || (active.action === 'RISK_REVIEW' ? '请人工复核' : '仅为建议，实际交易由你确认执行')}</div>
+              {active.proposed_qty != null && <div className="mt-2 text-xs">模型提案参考数量 {active.proposed_qty} 股；模拟盘另过执行门禁，实盘数量请按真实账户确认。</div>}
             </> : <div className="mt-1 text-xs text-muted-foreground">{closed ? 'A 股今日休市；已有分析仅供历史查阅。' : '当日没有有效建议；过期建议仅在下方历史中查看。'}</div>}
           </div>
           <div className="font-medium">历史建议</div>

@@ -1632,6 +1632,7 @@ class ModelRun(Base):
     input_hash = Column(String(64), nullable=False)
     output_hash = Column(String(64), nullable=True)
     output_text = Column(Text, nullable=True)
+    response_meta = Column(JSON, nullable=True)
     input_tokens = Column(Integer, nullable=True)
     output_tokens = Column(Integer, nullable=True)
     cost_usd = Column(Float, nullable=True)

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
+from zoneinfo import ZoneInfo
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -40,6 +41,11 @@ class ContextMaintenanceScheduler:
 
     async def _evaluate_job(self):
         if not cn_business_day():
+            return
+        # Historical cross-market evaluation can spend minutes on each vendor;
+        # keep it away from the live CN workflow and its network/worker pool.
+        local = datetime.now(ZoneInfo("Asia/Shanghai")).time()
+        if time(8, 30) <= local < time(15, 30):
             return
         if self._evaluating:
             logger.debug("[上下文维护] 上一轮后验评估仍在执行，跳过本轮")

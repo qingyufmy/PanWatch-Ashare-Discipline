@@ -6,23 +6,41 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from src.modules.portfolio.daily_workflow import FIXED_STEPS
+from src.modules.portfolio.daily_workflow import FIXED_STEPS, INTRADAY_BATCHES
 from src.modules.portfolio.premarket_briefing import briefing_for_plan
 from src.platform.scheduling.trading_calendar import confirmed_cn_trading_day
 from src.platform.persistence.database import get_db
 from src.platform.persistence.models import (
     DailyPortfolioPlan, EvidenceSnapshot, PortfolioDecision, PortfolioNotification,
     PortfolioRiskObservation, PortfolioWorkflowRun,
-    SignalEvent,
+    SignalEvent, ModelRun, PaperPortfolioFill,
 )
 
 router = APIRouter()
+
+
+@router.get("/runtime")
+def runtime(db: Session = Depends(get_db)):
+    day = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    batch = db.query(PortfolioWorkflowRun).filter(
+        PortfolioWorkflowRun.trade_date == day,
+        PortfolioWorkflowRun.step.in_(("MORNING_ADJUST", "AFTERNOON_ADJUST", "INTRADAY_REVIEW"))
+    ).order_by(PortfolioWorkflowRun.started_at.desc()).first()
+    scan = db.query(PortfolioWorkflowRun).filter_by(trade_date=day, step="PAPER_SCAN").order_by(
+        PortfolioWorkflowRun.started_at.desc()).first()
+    return {"trade_date": day, "batch": {"status": batch.status,
+        "started_at": _utc_iso(batch.started_at), "finished_at": _utc_iso(batch.finished_at),
+        "reason": (batch.payload or {}).get("reason"),
+        "coverage": len((batch.payload or {}).get("signal_ids", []))} if batch else None,
+        "paper_scan": {"finished_at": _utc_iso(scan.finished_at), **(scan.payload or {})} if scan else None,
+        "paper_fills_today": db.query(PaperPortfolioFill).filter_by(trade_date=day).count()}
 
 
 @router.get("/schedule")
 def schedule():
     return {"timezone": "Asia/Shanghai", "fixed_steps": [
         {"step": step, "time": hhmm} for step, hhmm in FIXED_STEPS],
+        "intraday_batch_times": [f"{hour:02d}:{int(minute):02d}" for hour, minutes in INTRADAY_BATCHES.items() for minute in minutes.split(',')],
         "monitor": {"hard_risk": "60s", "feature_refresh": "5m",
                     "windows": ["09:30-11:30", "13:00-15:00"]},
         "weekly_review": "Friday 20:30"}
@@ -127,6 +145,22 @@ def current_advice(db: Session = Depends(get_db)):
         "reason": (None if row.decision_status == "APPROVED" and row.data_status == "FRESH"
                    else "当前决议或行情证据未通过核查，不能作为明确交易建议"),
     } for row in rows if row.expires_at > now.replace(tzinfo=None)}
+    # A source-backed model proposal is visible to the user without representing
+    # approval for real trading. Keep unknown HOLD as unknown.
+    for row in rows:
+        if row.symbol not in result or row.expires_at <= now.replace(tzinfo=None):
+            continue
+        signal = db.get(SignalEvent, row.signal_id)
+        evidence = db.get(EvidenceSnapshot, signal.evidence_snapshot_id) if signal else None
+        payload = evidence.payload if evidence and isinstance(evidence.payload, dict) else {}
+        model = db.get(ModelRun, payload.get("model_run_id")) if payload.get("model_run_id") else None
+        if (signal and signal.source == "intraday_portfolio_plan"
+                and signal.action in {"ADD", "REDUCE", "EXIT"} and signal.qty_hint
+                and model and model.status == "OK" and model.schema_valid
+                and payload.get("schema_valid") is True):
+            result[row.symbol].update(action="PROPOSAL_" + signal.action,
+                reason=payload.get("rationale"), source="portfolio_proposal",
+                proposed_qty=signal.qty_hint, target_weight=signal.target_weight)
     observations = (db.query(PortfolioRiskObservation)
                     .filter(PortfolioRiskObservation.trade_date == day,
                             PortfolioRiskObservation.expires_at > now.replace(tzinfo=None))
@@ -139,6 +173,9 @@ def current_advice(db: Session = Depends(get_db)):
                 or evidence is None or evidence.captured_at > row.observed_at):
             continue
         previous = result.get(row.symbol)
+        if previous and previous.get("source") == "portfolio_proposal" and row.severity != "HIGH":
+            if datetime.fromisoformat(previous["created_at"]).replace(tzinfo=None) >= row.observed_at:
+                continue
         if previous and previous.get("source") == "shadow_risk" and previous.get("severity") == "HIGH":
             continue
         result[row.symbol] = {
@@ -146,6 +183,7 @@ def current_advice(db: Session = Depends(get_db)):
             "decision_status": "REVIEW_REQUIRED", "created_at": _utc_iso(row.observed_at),
             "expires_at": _utc_iso(row.expires_at), "source": "shadow_risk",
             "severity": row.severity,
+            "risk_kind": row.observation_type,
             "reason": ("已核实支撑破位，需人工复核；未批准交易" if row.observation_type == "CONFIRMED_SUPPORT_BREAK"
                        else "市场转弱且存在待核查方向提案；未批准交易"),
         }
@@ -161,5 +199,6 @@ def current_advice(db: Session = Depends(get_db)):
                     "created_at": _utc_iso(risk.finished_at),
                     "expires_at": _utc_iso(risk.finished_at + timedelta(seconds=180)),
                     "source": "hard_risk", "reason": "观察价触及，请人工核对行情与持仓计划",
+                    "risk_kind": "HARD_STOP",
                 }
     return {"trade_date": day, "market_status": "TRADING_DAY", "items": result}

@@ -106,6 +106,20 @@ def test_action_reversal_appends_revision_and_per_position_outbox():
             semantic_key=f"execution:{execution.execution_id}").one()
         assert update.delivery_status == "PENDING"
         assert "尚余60股" in update.body and "尚未经券商成交核对" in update.body
+        # A new source-backed portfolio review replaces the old action, even
+        # when the next review keeps the same direction with a different quantity.
+        for index in (10, 11):
+            at = (base + timedelta(minutes=index)).replace(tzinfo=timezone.utc)
+            proposal, _ = record_signal(db, market="CN", symbol="600001", action="REDUCE",
+                source="intraday_portfolio_plan", evidence={"nonce": index},
+                ttl_seconds=1200, qty_hint=100 * (index - 9), generated_at=at, commit=False)
+            proposal.status = "REVIEW_REQUIRED"
+            db.flush()
+            latest, notice = record_position_decision(db, proposal, now=at)
+            db.commit()
+            assert latest.signal_id == proposal.signal_id
+            assert notice is None
+            assert db.query(PortfolioDecision).filter_by(current=True).count() == 1
     engine.dispose()
 
 

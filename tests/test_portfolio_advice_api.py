@@ -14,6 +14,7 @@ from src.platform.persistence.database import Base
 from src.platform.persistence.models import (
     EvidenceSnapshot, PortfolioDecision, PortfolioNotification,
     PortfolioRiskObservation, PortfolioWorkflowRun,
+    SignalEvent, ModelRun,
 )
 
 
@@ -49,6 +50,24 @@ def test_advice_expiry_risk_priority_and_symbol_history():
                 created_at=now - timedelta(minutes=3 - revision), expires_at=expires,
             ))
         db.commit()
+        assert current_advice(db=db)["items"]["600001"]["action"] == "DATA_UNKNOWN"
+        model = ModelRun(run_id="model", trace_id="trace", role="FAST", profile_role="FAST",
+                         requested_model="fixture", prompt_id="review", input_hash="input",
+                         latency_ms=1, status="OK", schema_valid=True,
+                         started_at=now - timedelta(minutes=2), finished_at=now - timedelta(minutes=1))
+        evidence = EvidenceSnapshot(captured_at=now - timedelta(minutes=2), source="fixture",
+                                    logical_hash="proposal", payload={"schema_valid": True,
+                                    "model_run_id": "model", "rationale": "fixture"})
+        db.add_all([model, evidence]); db.flush()
+        signal = SignalEvent(signal_id="test-2", trace_id="trace", trade_date=day,
+            market="CN", symbol="600001", source="intraday_portfolio_plan", action="REDUCE",
+            qty_hint=100, target_weight=0.05, evidence_snapshot_id=evidence.id,
+            generated_at=now - timedelta(minutes=1), valid_from=now - timedelta(minutes=1),
+            expires_at=now + timedelta(minutes=10), status="REVIEW_REQUIRED", dedupe_key="signal", raw_action="REDUCE")
+        db.add(signal); db.commit()
+        assert current_advice(db=db)["items"]["600001"]["action"] == "PROPOSAL_REDUCE"
+        assert signal.status == "REVIEW_REQUIRED"
+        model.status = "FAILED"; db.commit()
         assert current_advice(db=db)["items"]["600001"]["action"] == "DATA_UNKNOWN"
         history = decisions(symbol="600001", current_only=False, db=db)
         assert [row["action"] for row in history] == ["HOLD", "ADD"]

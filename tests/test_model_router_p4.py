@@ -94,3 +94,22 @@ def test_timeout_records_failure(sessions):
         asyncio.run(run_role("DEEP", "sys", "user", db_factory=sessions, client_factory=Client))
     with sessions() as db:
         assert db.query(ModelRun).one().status == "FAILED"
+
+
+@pytest.mark.parametrize('content,finish,error', [('', 'length', 'model_empty_output'),
+                                                  ('{}', 'length', 'model_output_truncated')])
+def test_empty_and_truncated_are_journaled_without_hidden_retry(sessions, content, finish, error):
+    class Client:
+        def __init__(self, *a, **kw):
+            self.last_finish_reason = finish
+            self.last_reasoning_tokens = 10000
+        async def chat_multi(self, messages, **kw):
+            assert kw['response_format'] == {'type': 'json_object'}
+            return content
+    with pytest.raises(ValueError, match=error):
+        asyncio.run(run_role('FAST', 'sys', 'user', db_factory=sessions, client_factory=Client,
+                             schema_validator=lambda _: True))
+    with sessions() as db:
+        row = db.query(ModelRun).one()
+        assert row.response_meta['finish_reason'] == 'length'
+        assert row.response_meta['reasoning_tokens'] == 10000

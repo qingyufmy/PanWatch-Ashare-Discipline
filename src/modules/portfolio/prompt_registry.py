@@ -205,8 +205,11 @@ async def run_portfolio_prompt(prompt_id: str, payload: dict, *, db_factory=None
         try:
             parse_portfolio_plan(raw, symbols, trade_date)
             return True
-        except Exception:
-            return False
+        except Exception as exc:
+            # Keep field locations/types, never provider content, in the failure ledger.
+            errors = getattr(exc, "errors", lambda: [])()
+            codes = [".".join(map(str, e['loc'])) + ':' + e['type'] for e in errors[:4]]
+            raise ValueError("model_schema_invalid:" + (";".join(codes) or str(exc)[:80])) from exc
 
     result = await run_role(role, system, content, prompt_id=pid,
                             prompt_version=version, prompt_hash=digest,

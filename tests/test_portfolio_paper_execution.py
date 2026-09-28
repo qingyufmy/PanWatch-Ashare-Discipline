@@ -90,17 +90,22 @@ def test_paper_round_trip_never_sells_same_day_buy_and_is_idempotent(monkeypatch
     engine, db = _db(monkeypatch)
     try:
         _signal(db, "REDUCE", 100, 1)
-        _signal(db, "ADD", 100, 2, target=0.05)
-        _signal(db, "EXIT", 300, 3)
         account = db.get(PaperTradingAccount, 1)
-        result = scan_portfolio_paper(db, account, now=NOW, quote_fetcher=_quotes)
-        assert (result["opened"], result["closed"]) == (1, 1)
+        result = scan_portfolio_paper(db, account, now=NOW + timedelta(seconds=1), quote_fetcher=_quotes)
+        assert result["closed"] == 1
+        _signal(db, "ADD", 100, 2, target=0.05)
+        result = scan_portfolio_paper(db, account, now=NOW + timedelta(seconds=2), quote_fetcher=_quotes)
+        assert result["opened"] == 1
+        _signal(db, "EXIT", 300, 3)
+        result = scan_portfolio_paper(db, account, now=NOW + timedelta(seconds=3), quote_fetcher=_quotes)
+        assert result["closed"] == 0
+        assert result["skipped_reasons"] == {"SELL_QUANTITY_LOT_OR_T_PLUS_ONE": 1}
         assert db.query(PaperPortfolioFill).count() == 2
         assert db.query(PaperTradingTrade).count() == 1
         position = db.query(PaperTradingPosition).one()
         assert position.quantity == 300 and position.status == "open"
         cash = account.current_capital
-        again = scan_portfolio_paper(db, account, now=NOW, quote_fetcher=_quotes)
+        again = scan_portfolio_paper(db, account, now=NOW + timedelta(seconds=3), quote_fetcher=_quotes)
         assert again["opened"] == again["closed"] == 0
         assert account.current_capital == cash
     finally:
@@ -113,13 +118,14 @@ def test_stale_quote_or_blocked_policy_cannot_fill(monkeypatch):
     try:
         _signal(db, "REDUCE", 100, 1)
         stale = lambda symbols: [{**q, "source_asof": "20260924095000"} for q in _quotes(symbols)]
-        result = scan_portfolio_paper(db, db.get(PaperTradingAccount, 1), now=NOW,
+        result = scan_portfolio_paper(db, db.get(PaperTradingAccount, 1), now=NOW + timedelta(seconds=1),
                                       quote_fetcher=stale)
         assert result["closed"] == 0
         _signal(db, "REDUCE", 100, 2, blocked=True)
-        result = scan_portfolio_paper(db, db.get(PaperTradingAccount, 1), now=NOW,
+        result = scan_portfolio_paper(db, db.get(PaperTradingAccount, 1), now=NOW + timedelta(seconds=2),
                                       quote_fetcher=_quotes)
-        assert result["closed"] == 1
+        assert result["closed"] == 0  # Newest blocked instruction supersedes the older direction.
+        assert result["skipped_reasons"] == {"POLICY_BLOCKED_OR_INCOMPLETE": 1}
         assert db.get(PaperPortfolioFill, "signal-2") is None
     finally:
         db.close()
@@ -130,6 +136,26 @@ def test_global_quote_without_source_time_is_not_fresh():
     row = _quote({"symbol": "NVDA", "current_price": 200, "change_pct": 1,
                   "source_asof": None}, "NVIDIA", collected_at=NOW, phase="INTRADAY")
     assert row["quality"] == "SOURCE_TIME_UNKNOWN"
+
+
+def test_future_and_superseded_signal_never_fills(monkeypatch):
+    engine, db = _db(monkeypatch)
+    try:
+        _signal(db, 'REDUCE', 100, 1)
+        account = db.get(PaperTradingAccount, 1)
+        assert scan_portfolio_paper(db, account, now=NOW, quote_fetcher=_quotes)['closed'] == 0
+        _signal(db, 'HOLD', None, 2)
+        result = scan_portfolio_paper(db, account, now=NOW + timedelta(seconds=3), quote_fetcher=_quotes)
+        assert result['closed'] == 0
+        assert result['skipped_reasons'] == {'LATEST_ACTION_HAS_NO_TRADE': 1}
+        latest = db.get(SignalEvent, 'signal-2')
+        latest.expires_at = UTC + timedelta(seconds=4)
+        db.commit()
+        result = scan_portfolio_paper(db, account, now=NOW + timedelta(seconds=5), quote_fetcher=_quotes)
+        assert result['closed'] == 0
+        assert result['skipped_reasons'] == {'LATEST_SIGNAL_EXPIRED': 1}
+    finally:
+        db.close(); engine.dispose()
 
 
 def test_eod_nav_requires_all_dated_quotes_and_is_idempotent(monkeypatch):
@@ -152,3 +178,19 @@ def test_eod_nav_requires_all_dated_quotes_and_is_idempotent(monkeypatch):
     finally:
         db.close()
         engine.dispose()
+
+
+def test_prompt_receives_exact_paper_sell_constraints(monkeypatch):
+    from src.modules.portfolio.daily_workflow import _paper_state
+    engine, db = _db(monkeypatch)
+    state = _paper_state(db)
+    p = state["positions"][0]
+    assert p["sellable_quantity"] == 300
+    assert p["paper_sell_constraints"] == {"reduce_minimum": 100, "reduce_increment": 100,
+                                            "reduce_maximum": 200, "exit_quantity": 300}
+    position = db.query(PaperTradingPosition).one()
+    position.stock_symbol = "688146"; position.quantity = 100; db.commit()
+    constraint = _paper_state(db)["positions"][0]["paper_sell_constraints"]
+    assert constraint["reduce_maximum"] < constraint["reduce_minimum"]
+    assert constraint["exit_quantity"] == 100
+    db.close(); engine.dispose()

@@ -65,6 +65,7 @@ def record_position_decision(db: Session, signal: SignalEvent, *,
         "action": signal.action, "qty": qty, "plan": signal.plan_version,
         "status": signal.status, "execution": execution_status,
         "broken_prior_support": broken,
+        "portfolio_proposal": signal.signal_id if signal.source == "intraday_portfolio_plan" else None,
     })
     current = (db.query(PortfolioDecision).filter_by(trade_date=signal.trade_date,
                symbol=bare_symbol, current=True).order_by(PortfolioDecision.id.desc()).first())
@@ -72,7 +73,8 @@ def record_position_decision(db: Session, signal: SignalEvent, *,
         # An older model response cannot replace a newer decision or hard risk.
         if signal.generated_at <= current.created_at:
             return current, None
-        if current.decision_status == "APPROVED" and signal.status != "APPROVED":
+        if (current.decision_status == "APPROVED" and signal.status != "APPROVED"
+                and signal.source != "intraday_portfolio_plan"):
             return current, None
         if current.plan_version is not None and signal.plan_version is not None and signal.plan_version < current.plan_version:
             return current, None

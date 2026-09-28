@@ -85,7 +85,8 @@ class AgentScheduler:
                              result=reason, trigger_source="schedule")
             return
 
-        replaced = {"premarket_outlook": "portfolio_PREMARKET_PLAN", "daily_report": "portfolio_DAILY_REVIEW"}
+        replaced = {"premarket_outlook": "portfolio_PREMARKET_PLAN", "daily_report": "portfolio_DAILY_REVIEW",
+                    "intraday_monitor": "portfolio_INTRADAY_REVIEW_10"}
         if agent_name in replaced and self.scheduler.get_job(replaced[agent_name]) is not None:
             record_agent_run(agent_name=agent_name, status="skipped",
                              result="SUPERSEDED_BY_PORTFOLIO_WORKFLOW", trigger_source="schedule")

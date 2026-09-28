@@ -55,6 +55,7 @@ class PriceAlertScheduler:
             seconds=self.interval_seconds,
             jitter=20,  # 抖动错峰,避免与模拟盘扫描每 60s 同刻并发写 SQLite
             id="price_alert_scan",
+            misfire_grace_time=30,
             replace_existing=True,
             coalesce=True,
             max_instances=1,

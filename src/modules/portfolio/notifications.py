@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from src.modules.portfolio.discipline import logical_hash
 from src.modules.portfolio.issue_ledger import record_issue
-from src.platform.notifications.notifier import NotifierManager
+from src.modules.portfolio.lark_transport import LarkNotifier as NotifierManager
 from src.platform.persistence.models import NotifyChannel, PortfolioDecision, PortfolioNotification
 
 SH = ZoneInfo("Asia/Shanghai")
@@ -75,7 +75,7 @@ def enqueue_portfolio_notice(db, *, key: str, title: str, content: str,
 
 
 async def dispatch_portfolio_notice(notification_id: str, *, db_factory,
-                                    timeout_seconds: int = 10, retry: bool = False) -> dict:
+                                    timeout_seconds: int = 20, retry: bool = False) -> dict:
     """Never blindly resend an accepted, uncertain, superseded or expired message."""
     with db_factory() as db:
         row = db.get(PortfolioNotification, notification_id)
@@ -123,7 +123,7 @@ async def dispatch_portfolio_notice(notification_id: str, *, db_factory,
         elif result.get("skipped"):
             status, reason = "FAILED_RETRYABLE", str(result["skipped"])[:80]
         else:
-            status, reason = "FAILED_RETRYABLE", "CHANNEL_SEND_FAILED"
+            status, reason = "FAILED_RETRYABLE", str(result.get("error") or "CHANNEL_SEND_FAILED")[:80]
     except Exception as exc:
         # A transport exception may happen after the provider accepted the body.
         status, reason = "DELIVERY_UNKNOWN", type(exc).__name__
@@ -145,7 +145,7 @@ async def dispatch_portfolio_notice(notification_id: str, *, db_factory,
 
 
 async def send_portfolio_notice(*, key: str, title: str, content: str,
-                                db_factory, timeout_seconds: int = 10,
+                                db_factory, timeout_seconds: int = 20,
                                 trade_date: str | None = None, symbol: str | None = None,
                                 priority: str = "NORMAL", reason: str = "PLAN",
                                 expires_at: datetime | None = None) -> dict:

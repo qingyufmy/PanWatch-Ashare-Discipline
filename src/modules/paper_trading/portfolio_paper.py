@@ -9,6 +9,9 @@ from __future__ import annotations
 from datetime import datetime, time, timezone
 from math import floor, isfinite
 from zoneinfo import ZoneInfo
+from threading import Lock
+from collections import Counter
+import uuid
 
 from marketdata.vendors.tencent import fetch_raw
 from sqlalchemy.orm import Session
@@ -18,7 +21,7 @@ from src.platform.scheduling import trading_calendar
 from src.platform.persistence.models import (
     AppSettings, EvidenceSnapshot, ModelRun, PaperPortfolioFill, PaperPortfolioNav,
     PaperTradingAccount, PaperTradingPosition, PaperTradingTrade,
-    SignalEvent, SignalPolicyDecision, PositionPlan,
+    SignalEvent, SignalPolicyDecision, PositionPlan, PortfolioWorkflowRun,
 )
 
 SH = ZoneInfo("Asia/Shanghai")
@@ -26,6 +29,7 @@ COST = CostModel()
 INDEX_CODES = ("sh000001", "sz399001", "sz399006", "sh000300")
 VALID_SOURCES = {"daily_portfolio_plan", "intraday_portfolio_plan"}
 MAX_PORTFOLIO_EXPOSURE = 0.60
+_SCAN_LOCK = Lock()
 
 
 def paper_mode(db: Session) -> bool:
@@ -86,13 +90,38 @@ def _buy_qty(signal: SignalEvent, *, price: float, cash: float,
 
 def scan_portfolio_paper(db: Session, account: PaperTradingAccount, *,
                          now: datetime | None = None, quote_fetcher=fetch_raw) -> dict:
+    if not _SCAN_LOCK.acquire(blocking=False):
+        return {"status": "scan_in_progress", "opened": 0, "closed": 0}
+    started = datetime.now(timezone.utc).replace(tzinfo=None)
+    try:
+        result = _scan_portfolio_paper(db, account, now=now, quote_fetcher=quote_fetcher)
+        moment = (now or datetime.now(SH)).astimezone(SH)
+        db.add(PortfolioWorkflowRun(run_id=uuid.uuid4().hex, trade_date=moment.date().isoformat(),
+            step="PAPER_SCAN", slot=uuid.uuid4().hex[:16],
+            status="SUCCEEDED" if result.get("status") == "ok" else "REVIEW", payload=result,
+            started_at=started, finished_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+        db.commit()
+        return result
+    except Exception as exc:
+        db.rollback()
+        moment = (now or datetime.now(SH)).astimezone(SH)
+        db.add(PortfolioWorkflowRun(run_id=uuid.uuid4().hex, trade_date=moment.date().isoformat(),
+            step="PAPER_SCAN", slot=uuid.uuid4().hex[:16], status="FAILED",
+            payload={"status": "scan_error", "error": type(exc).__name__},
+            started_at=started, finished_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+        db.commit()
+        raise
+    finally:
+        _SCAN_LOCK.release()
+
+
+def _scan_portfolio_paper(db: Session, account: PaperTradingAccount, *,
+                          now: datetime | None = None, quote_fetcher=fetch_raw) -> dict:
     """Mark positions and fill fresh, explicit signals once during CN continuous trading."""
     moment = (now or datetime.now(SH)).astimezone(SH)
     if not account.enabled or not paper_mode(db):
         return {"status": "disabled", "opened": 0, "closed": 0}
-    if (trading_calendar._CN_TRADING_DATES is None or
-            trading_calendar._CN_RANGE is None or
-            not trading_calendar.is_trading_day("CN", moment.date())):
+    if trading_calendar.confirmed_cn_trading_day(moment.date()) is not True:
         return {"status": "calendar_unverified_or_closed", "opened": 0, "closed": 0}
     if not (time(9, 30) <= moment.time() < time(11, 30) or
                                      time(13, 0) <= moment.time() < time(14, 57)):
@@ -105,11 +134,13 @@ def scan_portfolio_paper(db: Session, account: PaperTradingAccount, *,
                .filter(SignalEvent.trade_date == day,
                        SignalEvent.market == "CN",
                        SignalEvent.source.in_(VALID_SOURCES),
-                       SignalEvent.action.in_(("ADD", "REDUCE", "EXIT")),
-                       SignalEvent.status.in_(("APPROVED", "REVIEW_REQUIRED")),
-                       SignalEvent.valid_from <= utc_now,
-                       SignalEvent.expires_at > utc_now)
-               .order_by(SignalEvent.generated_at.asc(), SignalEvent.signal_id.asc()).all())
+                       SignalEvent.generated_at <= utc_now,
+                       SignalEvent.valid_from <= utc_now)
+               .order_by(SignalEvent.generated_at.desc(), SignalEvent.signal_id.desc()).all())
+    latest = {}
+    for signal in signals:
+        latest.setdefault(signal.symbol, signal)
+    signals = list(latest.values())
     symbols = sorted({p.stock_symbol for p in positions} | {s.symbol for s in signals})
     requested = [*INDEX_CODES, *[("sh" if s.startswith(("6", "9")) else "sz") + s for s in symbols]]
     try:
@@ -134,29 +165,50 @@ def scan_portfolio_paper(db: Session, account: PaperTradingAccount, *,
                 p.unrealized_pnl = round((price - p.entry_price) * p.quantity, 4)
     opened = closed = 0
     filled_ids = []
+    skipped = Counter()
+    assessments = []
+    def skip(signal, reason):
+        skipped[reason] += 1
+        assessments.append({"symbol": signal.symbol, "signal_id": signal.signal_id,
+                            "action": signal.action, "outcome": "SKIPPED", "reason": reason})
     for signal in signals:
+        if signal.expires_at <= utc_now:
+            skip(signal, "LATEST_SIGNAL_EXPIRED")
+            continue
+        if signal.status not in {"APPROVED", "REVIEW_REQUIRED"}:
+            skip(signal, "LATEST_SIGNAL_NOT_ELIGIBLE")
+            continue
+        if signal.action not in {"ADD", "REDUCE", "EXIT"}:
+            skip(signal, "LATEST_ACTION_HAS_NO_TRADE")
+            continue
         if db.get(PaperPortfolioFill, signal.signal_id):
+            skip(signal, "ALREADY_FILLED")
             continue
         pos = pos_by_symbol.get(signal.symbol)
         if pos is None:
+            skip(signal, "NO_OPEN_PAPER_POSITION")
             continue  # This cohort only mirrors the held portfolio.
         quote = quotes.get(signal.symbol)
         asof = _asof(quote, moment)
         if not asof or not quote or not quote.get("volume"):
+            skip(signal, "QUOTE_STALE_OR_NO_VOLUME")
             continue
         try:
             price = float(quote["current_price"])
         except (TypeError, ValueError, KeyError):
+            skip(signal, "INVALID_PRICE")
             continue
         if not isfinite(price) or price <= 0 or not signal.qty_hint:
+            skip(signal, "PRICE_OR_QUANTITY_MISSING")
             continue
         evidence = db.get(EvidenceSnapshot, signal.evidence_snapshot_id)
         payload = evidence.payload if evidence and isinstance(evidence.payload, dict) else {}
         confidence = payload.get("confidence")
         model = db.get(ModelRun, payload.get("model_run_id")) if payload.get("model_run_id") else None
         if (payload.get("schema_valid") is not True or
-                not isinstance(confidence, (float, int)) or confidence < 0.65 or
+                not isinstance(confidence, (float, int)) or not isfinite(confidence) or confidence < 0.65 or
                 not model or model.status != "OK" or model.schema_valid is not True):
+            skip(signal, "MODEL_OR_CONFIDENCE_UNVERIFIED")
             continue
         if signal.action == "ADD":
             auction_id = payload.get("auction_evidence_snapshot_id")
@@ -165,9 +217,11 @@ def scan_portfolio_paper(db: Session, account: PaperTradingAccount, *,
                     not isinstance(auction.payload, dict) or auction.payload.get("trade_date") != day or
                     not any(q.get("symbol") == signal.symbol and q.get("quality") == "FRESH"
                             for q in auction.payload.get("holdings", []))):
+                skip(signal, "AUCTION_EVIDENCE_MISSING")
                 continue
         verdicts = db.query(SignalPolicyDecision).filter_by(signal_id=signal.signal_id).all()
         if len(verdicts) < 13 or any(v.decision in {"BLOCK", "EXPIRED"} for v in verdicts):
+            skip(signal, "POLICY_BLOCKED_OR_INCOMPLETE")
             continue
         day_buys = sum(f.quantity for f in db.query(PaperPortfolioFill).filter_by(
             trade_date=day, symbol=signal.symbol, action="ADD").all())
@@ -187,6 +241,7 @@ def scan_portfolio_paper(db: Session, account: PaperTradingAccount, *,
                            max_weight=position_rule.get("max_weight"),
                            stop=risk_rule.get("current_stop"), invested_value=invested_value)
             if qty <= 0:
+                skip(signal, "ADD_MARKET_CASH_WEIGHT_OR_RISK_LIMIT")
                 continue
             fill = COST.fill("buy", price, qty)
             old_qty = pos.quantity
@@ -199,6 +254,7 @@ def scan_portfolio_paper(db: Session, account: PaperTradingAccount, *,
             qty = _sell_qty(signal.action, int(signal.qty_hint), pos.quantity,
                             sellable, signal.symbol)
             if qty <= 0:
+                skip(signal, "SELL_QUANTITY_LOT_OR_T_PLUS_ONE")
                 continue
             fill = COST.fill("sell", price, qty)
             pnl = round(fill.cash_delta - pos.entry_price * qty, 4)
@@ -232,11 +288,16 @@ def scan_portfolio_paper(db: Session, account: PaperTradingAccount, *,
             filled_at=moment.astimezone(timezone.utc).replace(tzinfo=None),
             policy_scope="PAPER_ONLY",
             details={"signal_status": signal.status, "model_run_id": model.run_id,
+                     "evidence_snapshot_id": signal.evidence_snapshot_id,
+                     "plan_version": signal.plan_version,
+                     "policy_decision_ids": [v.id for v in verdicts],
                      "source_truth_snapshot_id": signal.truth_snapshot_id,
                      "quote_source": "tencent_quote", "fill_assumption": "last_trade_with_cost_model",
                      "risk_on_indices": risk_on},
         ))
         filled_ids.append(signal.signal_id)
+        assessments.append({"symbol": signal.symbol, "signal_id": signal.signal_id,
+                            "action": signal.action, "outcome": "FILLED", "reason": "PAPER_ONLY"})
     equity = account.current_capital + sum(
         float(p.current_price or p.entry_price) * p.quantity
         for p in positions if p.status == "open")
@@ -246,6 +307,8 @@ def scan_portfolio_paper(db: Session, account: PaperTradingAccount, *,
     db.commit()
     return {"status": "ok", "opened": opened, "closed": closed,
             "filled_signal_ids": filled_ids, "fresh_indices": len(fresh_indices),
+            "eligible_latest_signals": len(signals), "skipped_reasons": dict(skipped),
+            "assessments": assessments, "no_signal_reason": "NO_CURRENT_PORTFOLIO_SIGNAL" if not signals else None,
             "risk_on": risk_on, "marked_positions": len(positions)}
 
 

@@ -2334,6 +2334,11 @@ def _m142_risk_observation_level_lineage(conn: Connection) -> None:
                            "REFERENCES portfolio_level_snapshots(id)")
 
 
+def _m143_model_response_metadata(conn: Connection) -> None:
+    _add_column_if_missing(conn, "model_runs", "response_meta",
+                           "ALTER TABLE model_runs ADD COLUMN response_meta JSON")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(101, "agent_config_kind_and_visibility", _m101_agent_config_kind),
     Migration(102, "backfill_agent_kind_data", _m102_backfill_agent_kind),
@@ -2377,6 +2382,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(140, "paper_portfolio_nav", _m140_paper_portfolio_nav),
     Migration(141, "portfolio_risk_observations", _m141_portfolio_risk_observations),
     Migration(142, "risk_observation_level_lineage", _m142_risk_observation_level_lineage),
+    Migration(143, "model_response_metadata", _m143_model_response_metadata),
 )
 
 

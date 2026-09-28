@@ -36,7 +36,7 @@ def test_simulated_day_all_slots_are_unique_and_replay_is_idempotent():
     assert len(slots) > 250
     assert ("HARD_RISK", datetime(2026, 9, 23, 14, 55, tzinfo=SH)) in slots
     assert ("HARD_RISK", datetime(2026, 9, 23, 15, 0, tzinfo=SH)) in slots
-    assert len({(step, at.strftime("%H:%M") if step in {"HARD_RISK", "FEATURE_REFRESH"} else "DAILY")
+    assert len({(step, at.strftime("%H:%M") if step in {"HARD_RISK", "FEATURE_REFRESH", "INTRADAY_REVIEW"} else "DAILY")
                 for step, at in slots}) == len(slots)
     invoked = []
 
@@ -169,4 +169,31 @@ def test_batch_plan_creates_eleven_review_signals_with_daily_plan_link(monkeypat
             assert result["reason"] == "MODEL_FAILED_RULE_PREPARATION"
         assert all(s.daily_plan_version == 1 and s.status == "REVIEW_REQUIRED" for s in signals)
         assert all(s.generated_at >= datetime(2026, 9, 23, 0, 50, 30) for s in signals)
+    engine.dispose()
+
+
+def test_new_batch_slots_only_audited_after_activation():
+    engine, factory = _db()
+    recover_missed(now=datetime(2026, 9, 28, 10, 26, tzinfo=SH), db_factory=factory,
+                   calendar_check=lambda _: True)
+    recover_missed(now=datetime(2026, 9, 28, 10, 34, tzinfo=SH), db_factory=factory,
+                   calendar_check=lambda _: True)
+    with factory() as db:
+        rows = db.query(PortfolioWorkflowRun).filter_by(step="INTRADAY_REVIEW").all()
+        assert [(r.slot, r.status) for r in rows] == [("10:30", "MISSED")]
+    engine.dispose()
+
+
+def test_parallel_batches_do_not_overlap():
+    engine, factory = _db()
+    invoked = []
+    async def handler(*args):
+        invoked.append(args[0])
+        result = await run_step("INTRADAY_REVIEW", now=datetime(2026, 9, 28, 10, 1, tzinfo=SH),
+                                db_factory=factory, handler=handler, calendar_check=lambda _: True)
+        assert result["reason"] == "BATCH_ALREADY_RUNNING"
+        return {"status": "SUCCEEDED"}
+    asyncio.run(run_step("MORNING_ADJUST", now=datetime(2026, 9, 28, 10, 0, tzinfo=SH),
+                         db_factory=factory, handler=handler, calendar_check=lambda _: True))
+    assert invoked == ["MORNING_ADJUST"]
     engine.dispose()

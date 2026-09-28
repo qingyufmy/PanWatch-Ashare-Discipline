@@ -29,3 +29,9 @@ Windows 计划任务 `PanWatch Local Backend` 每日 08:00 至 22:00 每 5 分�
 实施合同见 [notification_contract_v2.md](notification_contract_v2.md)、[technical_levels_contract_v1.md](technical_levels_contract_v1.md)、[notification_delivery_contract_v1.md](notification_delivery_contract_v1.md)；隔离回放见 `reports/notification_replay/2026-09-23/`。这些是候选代码及合成回放证据，运行版没有自动升级。`portfolio_discipline_mode` 默认 `disabled`。新 Prompt、Policy 和模板必须先完成冻结回放、自然日 Shadow、真实通知审阅以及用户批准，才能切换生产生效状态。
 
 候选版本启用前，以 SQLite 在线备份核对迁移、真实持仓 Truth、可用现金、每只证券规则的来源和有效时刻，再检查 11 只持仓的 Feature/Level 质量与计划版本。运行后用 `/api/portfolio-workflow/notifications` 与 `/decisions` 核对发送、拒绝、未知和执行状态；私有通知包用 `python scripts/export-notification-review.py --trade-date YYYY-MM-DD` 生成于忽略目录 `data/notification_reviews/`。对外仅使用 `scripts/export-public-daily.py` 的白名单摘要。平台接受、用户已读、用户登记及券商核对分别统计。回滚时保留新账本和 Issue，不删历史记录。
+
+## 盘中运行链路（2026-09-28 修复）
+
+盘中持仓改用每次覆盖全组合的统一批次，具体时间见 `/api/portfolio-workflow/schedule`；旧五分钟 intraday_monitor 自动入口由新工作流替代。FAST 使用关闭思考的 JSON 响应、80 秒超时且不自动重试；模型失败或超出行情时效不生成操作信号。每分钟 PAPER_ONLY 扫描只处理每股最新信号，记录具体跳过原因。页面 `/paper-trading` 展示批次与扫描状态。每股最新提案不等于实盘批准；用户填报值仍未券商核对。
+
+核查 `/api/portfolio-workflow/runtime`、逐笔模拟成交、十三条政策记录及行情源时间。数据库迁移 143 保存模型终止元数据；盘中海外历史后验维护延后，风险报价交叉校验在工作线程执行，避免阻塞异步调度。新增批次漏跑从激活时刻起记录，不回填。修复与真实链路证据见 [盘中稳定性修复](../incidents/20260928/intraday_stability_repair.md)。全天运行与 P10 发布资格仍需分别验收。

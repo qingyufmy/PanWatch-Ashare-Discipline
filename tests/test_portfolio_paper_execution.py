@@ -1,5 +1,6 @@
 """Paper-only account invariants: frozen signal lineage, idempotency and T+1."""
 
+import pytest
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -9,6 +10,8 @@ from sqlalchemy.orm import Session
 from src.modules.paper_trading.portfolio_paper import capture_paper_nav, scan_portfolio_paper
 from src.modules.paper_trading.api.paper_trading import _build_equity_curve
 from src.modules.portfolio.market_context import _quote
+from src.modules.portfolio.policy_gate import RULE_IDS
+from src.modules.portfolio.proposal_integrity import VERSION, SCOPE, price_fact
 from src.platform.scheduling import trading_calendar
 from src.platform.persistence.database import Base
 from src.platform.persistence.models import (
@@ -57,6 +60,10 @@ def _signal(db: Session, action: str, qty: int, order: int, target: float | None
     evidence = EvidenceSnapshot(captured_at=UTC, source="fixture", logical_hash=f"e{order}",
                                 payload={"schema_valid": True, "confidence": 0.9,
                                          "model_run_id": "model",
+                                         "decision_contract": VERSION, "account_scope": SCOPE,
+                                         "decision_fact": price_fact(10, 8),
+                                         "model_proposal": {"action": action, "stop_relation": "ABOVE",
+                                             "decision_basis": "OTHER", "rationale": "source-backed test"},
                                          "auction_evidence_snapshot_id": auction.id})
     db.add(evidence)
     db.flush()
@@ -70,8 +77,8 @@ def _signal(db: Session, action: str, qty: int, order: int, target: float | None
         dedupe_key=f"dedupe-{order}", status="REVIEW_REQUIRED",
     )
     db.add(signal)
-    for i in range(13):
-        db.add(SignalPolicyDecision(signal_id=signal.signal_id, rule_id=f"rule-{i}",
+    for i, rule in enumerate(RULE_IDS):
+        db.add(SignalPolicyDecision(signal_id=signal.signal_id, rule_id=rule,
                                     input_hash="input", decision="BLOCK" if blocked and i == 0 else "REVIEW"))
     db.commit()
 
@@ -194,3 +201,32 @@ def test_prompt_receives_exact_paper_sell_constraints(monkeypatch):
     assert constraint["reduce_maximum"] < constraint["reduce_minimum"]
     assert constraint["exit_quantity"] == 100
     db.close(); engine.dispose()
+
+
+@pytest.mark.parametrize("corrupt", ["scope", "price_claim", "policy_rule", "recovered_price", "plan_changed"])
+def test_invalid_proposal_never_fills_or_changes_account(monkeypatch, corrupt):
+    engine, db = _db(monkeypatch)
+    try:
+        _signal(db,"REDUCE",100,1)
+        signal=db.get(SignalEvent,"signal-1")
+        evidence=db.get(EvidenceSnapshot,signal.evidence_snapshot_id)
+        payload=dict(evidence.payload)
+        if corrupt == "scope":
+            payload["account_scope"]="PAPER_ONLY"
+        elif corrupt == "price_claim":
+            payload["model_proposal"]={**payload["model_proposal"],"decision_basis":"OBSERVATION_PRICE","rationale":"现价低于观察价"}
+        elif corrupt == "recovered_price":
+            payload["decision_fact"] = price_fact(7,8)
+            payload["model_proposal"] = {"action":"REDUCE","stop_relation":"AT_OR_BELOW","decision_basis":"OBSERVATION_PRICE","rationale":"已触及观察价"}
+        elif corrupt == "plan_changed":
+            db.query(PositionPlan).one().version = 2
+        else:
+            db.query(SignalPolicyDecision).filter_by(signal_id=signal.signal_id,rule_id="MODEL_CONFLICT").one().rule_id="fake-rule"
+        evidence.payload=payload;db.commit()
+        account=db.get(PaperTradingAccount,1);cash=account.current_capital
+        result=scan_portfolio_paper(db,account,now=NOW+timedelta(seconds=1),quote_fetcher=_quotes)
+        assert result["closed"] == 0 and account.current_capital == cash
+        assert db.query(PaperPortfolioFill).count() == 0
+        assert db.query(PaperTradingPosition).one().quantity == 300
+    finally:
+        db.close();engine.dispose()

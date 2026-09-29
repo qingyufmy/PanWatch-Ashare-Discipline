@@ -57,7 +57,10 @@ def test_advice_expiry_risk_priority_and_symbol_history():
                          started_at=now - timedelta(minutes=2), finished_at=now - timedelta(minutes=1))
         evidence = EvidenceSnapshot(captured_at=now - timedelta(minutes=2), source="fixture",
                                     logical_hash="proposal", payload={"schema_valid": True,
-                                    "model_run_id": "model", "rationale": "fixture"})
+                                    "model_run_id": "model", "rationale": "fixture",
+                                    "decision_contract": "declared-facts-v1", "account_scope": "USER_DECLARED",
+                                    "decision_fact": {"price": 10.0, "current_stop": 8.0, "stop_relation": "ABOVE"},
+                                    "model_proposal": {"action": "REDUCE", "stop_relation": "ABOVE", "decision_basis": "OTHER"}})
         db.add_all([model, evidence]); db.flush()
         signal = SignalEvent(signal_id="test-2", trace_id="trace", trade_date=day,
             market="CN", symbol="600001", source="intraday_portfolio_plan", action="REDUCE",
@@ -67,6 +70,11 @@ def test_advice_expiry_risk_priority_and_symbol_history():
         db.add(signal); db.commit()
         assert current_advice(db=db)["items"]["600001"]["action"] == "PROPOSAL_REDUCE"
         assert signal.status == "REVIEW_REQUIRED"
+        saved = dict(evidence.payload)
+        evidence.payload = {**saved, "model_proposal": {"action": "REDUCE", "stop_relation": "AT_OR_BELOW", "decision_basis": "OBSERVATION_PRICE"}}
+        db.commit()
+        assert current_advice(db=db)["items"]["600001"]["action"] == "DATA_UNKNOWN"
+        evidence.payload = saved; db.commit()
         model.status = "FAILED"; db.commit()
         assert current_advice(db=db)["items"]["600001"]["action"] == "DATA_UNKNOWN"
         history = decisions(symbol="600001", current_only=False, db=db)

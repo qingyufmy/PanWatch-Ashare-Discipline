@@ -32,7 +32,8 @@ from src.modules.portfolio.risk_observation import record_shadow_risk_observatio
 from src.modules.portfolio.model_router import probe_role
 from src.modules.portfolio.market_context import collect_market_context
 from src.modules.portfolio.premarket_briefing import build_briefing, briefing_for_plan
-from src.modules.portfolio.prompt_registry import run_portfolio_prompt
+from src.modules.portfolio.prompt_registry import run_portfolio_prompt, FACT_PROMPT_ID
+from src.modules.portfolio.proposal_integrity import VERSION, SCOPE, price_fact, check_proposal
 from src.modules.portfolio.signal_journal import record_signal
 from src.modules.portfolio.policy_gate import evaluate_signal
 from src.platform.persistence.database import SessionLocal
@@ -63,7 +64,7 @@ FIXED_STEPS = (
     ("P10_REVIEW", "21:20"),
 )
 MONITOR_STARTS = ((time(9, 30), time(11, 30)), (time(13, 0), time(15, 0)))
-INTRADAY_BATCHES = {9: "45", 10: "15,30,45", 11: "0,15", 13: "15,45", 14: "0,15,30,45"}
+INTRADAY_BATCHES = {9: "30,35,40,45", 10: "15,30,45", 11: "0,15", 13: "15,45", 14: "0,15,30,45"}
 
 
 def _now_sh(now: datetime | None = None) -> datetime:
@@ -380,7 +381,6 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None,
     with db_factory() as db:
         market = await collect_market_context(db, trade_date=day, phase="PREMARKET",
                                               symbols=[p["symbol"] for p in positions], now=now)
-        paper_state = _paper_state(db)
         limits = _position_limits(db, positions)
         macro = EvidenceSnapshot(
             captured_at=_market_capture_time(market, now or datetime.now(timezone.utc)),
@@ -399,7 +399,7 @@ async def _premarket_plan(day: str, db_factory, now: datetime | None = None,
                 "truth_snapshot_id": truth_id,
                 "macro_evidence_snapshot_id": macro_id,
                 "market_context": market,
-                "paper_account": paper_state,
+                "account_scope": SCOPE,
                 "position_limits": limits, "preparation": preparation,
                 "planning_note": "上一确认交易日收盘是盘前有效基准，不因尚无今日竞价而一律作废。评估条件预案与建议仓位；成交仍需盘中新信号。请用简体中文解释。"}
     payload = {"trade_date": day, "positions": positions, "evidence": evidence}
@@ -499,7 +499,6 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str,
                       and auction.payload.get("trade_date") == day else None)
         market = await collect_market_context(db, trade_date=day, phase="INTRADAY",
                                               symbols=[p["symbol"] for p in positions], now=now)
-        paper_state = _paper_state(db)
         limits = _position_limits(db, positions)
         macro = EvidenceSnapshot(
             captured_at=_market_capture_time(market, now),
@@ -525,24 +524,38 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str,
         return _status("INTRADAY_MARKET_EVIDENCE_UNVERIFIED", macro_evidence_snapshot_id=macro_id,
                        fresh_holding_count=len(fresh), coverage=len(positions),
                        risk_observation_ids=shadow_ids)
+    limit_by_symbol = {row["symbol"]: row for row in limits}
+    facts = {q["symbol"]: price_fact(q.get("price"), limit_by_symbol.get(q["symbol"], {}).get("current_stop"))
+             for q in market["holdings"]}
+    for position in positions:
+        total, available = int(position["total_qty"]), int(position["sellable_qty"] or 0)
+        position["declared_sell_constraints"] = {
+            "reduce_minimum": 200 if position["symbol"].startswith("688") else 100,
+            "reduce_increment": 100,
+            "reduce_maximum": min(available // 100 * 100, (total - 1) // 100 * 100),
+            "exit_quantity": total if available == total else None}
     payload = {"trade_date": day, "positions": positions,
                "evidence": {"phase": phase, "truth_snapshot_id": truth.id,
                             "daily_plan_id": daily_plan_id,
                             "premarket_preparation": ({k: preparation.get(k) for k in
                                 ("version", "risk_tone", "exposure", "market_summary")} if preparation else None),
+                            "account_scope": SCOPE,
+                            "decision_contract": VERSION,
+                            "account_facts": {"nav": truth.nav, "cash": truth.cash,
+                                              "source": truth.source, "truth_status": truth.truth_status},
+                            "decision_facts": facts,
                             "execution_contract": {
-                                "scope": "PAPER_ONLY_PROPOSALS_REAL_TRADES_REQUIRE_USER",
+                                "scope": "USER_DECLARED_ADVICE_REAL_TRADES_REQUIRE_USER",
                                 "language": "简体中文；每股理由不超过100字，引用给定证据路径",
-                                "quantity": "变更动作必须有明确qty_hint；ADD/REDUCE必须有target_weight。模拟数量以paper_account.positions为准，实盘声明持仓不能替代模拟持仓。HOLD数量为null。无有效动作证据时HOLD，不能为凑成交而交易。",
-                                "sell_constraints": "严格遵守每股paper_sell_constraints：REDUCE必须在minimum与maximum之间且满足increment；卖出全部剩余股数必须用EXIT而非REDUCE。exit_quantity为null不得清仓。没有可执行减仓数量时不能编造数量，按证据判断EXIT或HOLD并说明。",
-                                "risk": "观察价已触及禁止HOLD或ADD；减仓/退出需结合当下证据与剩余可卖数量。日内T只能卖出隔夜可卖股，后续买回另需独立新信号。"},
+                                "quantity": "所有建议仅针对positions内用户声明持仓。遵守declared_sell_constraints；清仓必须EXIT。HOLD数量为null。ADD/REDUCE提供target_weight。现金未核实需说明待用户核对；仅有独立行情与目标仓位依据时才能给有条件加仓提案，不得引用模拟现金。",
+                                "facts": "逐股照抄decision_facts.stop_relation；decision_basis取OBSERVATION_PRICE/MARKET_WEAKNESS/OTHER/NO_CHANGE。只有AT_OR_BELOW才可称观察价已触及或跌破。价格理由只比较该股现价与观察价，不混用成本或指数。",
+                                "risk": "观察价触及禁止HOLD或ADD；没有可卖数量时说明待人工核实。当前建议不能根据模拟账户清仓与否改变。真实成交始终由用户确认。"},
                             "macro_evidence_snapshot_id": macro_id,
                             "auction_evidence_snapshot_id": auction_id,
                             "market_context": market,
-                            "paper_account": paper_state,
                             "position_limits": limits}}
     try:
-        proposal, model = await run_portfolio_prompt("review", payload, db_factory=db_factory)
+        proposal, model = await run_portfolio_prompt(FACT_PROMPT_ID, payload, db_factory=db_factory)
     except Exception as exc:
         with db_factory() as db:
             record_issue(db, category="MODEL_SCHEMA_ERROR" if isinstance(exc, ValueError) else "MODEL_TIMEOUT",
@@ -553,6 +566,7 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str,
                        risk_observation_ids=shadow_ids)
     quote_by_symbol = {q.get("symbol"): q for q in market["holdings"]}
     signal_ids = []
+    blocked_count = 0
     with db_factory() as db:
         model_run = db.get(ModelRun, model.run_id)
         prompt_version = model_run.prompt_version if model_run else None
@@ -568,7 +582,18 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str,
                            risk_observation_ids=shadow_ids)
         for action in proposal.proposals:
             quote = quote_by_symbol.get(action.symbol) or {}
-            frozen = {"schema_valid": True, "model_conflict": False,
+            fact = facts.get(action.symbol, price_fact(None, None))
+            integrity_errors = check_proposal(action.model_dump(mode="json"), fact)
+            if integrity_errors:
+                record_issue(db, category="MODEL_CONFLICT", code="PROPOSAL_FACT_CONFLICT", source=phase,
+                             title="Proposal contradicts frozen price facts or declared account scope",
+                             context={"model_run_id": model.run_id, "symbol": action.symbol,
+                                      "errors": integrity_errors})
+            frozen = {"schema_valid": True, "model_conflict": bool(integrity_errors),
+                      "decision_contract": VERSION, "account_scope": SCOPE,
+                      "declared_position": next(p for p in positions if p["symbol"] == action.symbol),
+                      "decision_fact": fact, "model_proposal": action.model_dump(mode="json"),
+                      "integrity_errors": integrity_errors,
                       "scheduled_at": now.isoformat(),
                       "model_finished_at": model_run.finished_at.isoformat(),
                       "market_data_source": quote.get("source"),
@@ -584,7 +609,7 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str,
                 source="intraday_portfolio_plan", source_agent="portfolio_intraday",
                 evidence=frozen, ttl_seconds=1200, generated_at=decision_at,
                 qty_hint=action.qty_hint, target_weight=action.target_weight,
-                prompt_id="review", prompt_version=prompt_version,
+                prompt_id=FACT_PROMPT_ID, prompt_version=prompt_version,
                 model_role=model.requested_role,
                 requested_model=model.requested_model, reported_model=model.reported_model,
                 commit=False,
@@ -592,11 +617,13 @@ async def _intraday_adjustment(day: str, db_factory, now: datetime, phase: str,
             if created:
                 evaluate_signal(db, signal.signal_id, now=decision_at, commit=False)
                 record_position_decision(db, signal, now=decision_at, queue_notification=False)
+            blocked_count += int(signal.status == "POLICY_REJECTED")
             signal_ids.append(signal.signal_id)
         db.commit()
     return {"status": "REVIEW", "reason": "PAPER_ONLY_SIGNALS_REQUIRE_LIVE_FILL_GATE",
             "model_run_id": model.run_id, "macro_evidence_snapshot_id": macro_id,
             "signal_ids": signal_ids, "coverage": len(signal_ids),
+            "blocked_proposal_count": blocked_count,
             "risk_observation_ids": shadow_ids,
             "portfolio_rationale": proposal.portfolio_rationale}
 
@@ -794,7 +821,7 @@ async def run_step(step: str, *, now: datetime | None = None,
         trading_calendar.confirmed_cn_trading_day(moment.date())
     )
     with db_factory() as db:
-        if step == "INTRADAY_REVIEW" and not (time(9, 35) <= moment.time() < time(11, 30)
+        if step == "INTRADAY_REVIEW" and not (time(9, 30) <= moment.time() < time(11, 30)
                                                 or time(13, 0) <= moment.time() < time(14, 57)):
             return {"status": "SKIPPED", "reason": "OUTSIDE_CN_CONTINUOUS_SESSION"}
         if step in {"MORNING_ADJUST", "AFTERNOON_ADJUST", "INTRADAY_REVIEW"}:
@@ -899,6 +926,17 @@ def recover_missed(*, now: datetime | None = None, db_factory=SessionLocal,
             db.add(batch_activation)
             db.commit()
         batch_start = datetime.fromisoformat(batch_activation.payload["activated_at"]).astimezone(SH)
+        opening_activation = db.query(PortfolioWorkflowRun).filter_by(
+            trade_date="GLOBAL", step="OPENING_BATCH_ACTIVATED", slot="ONCE").first()
+        if opening_activation is None:
+            opening_activation = PortfolioWorkflowRun(
+                run_id=uuid.uuid4().hex, trade_date="GLOBAL", step="OPENING_BATCH_ACTIVATED", slot="ONCE",
+                status="SUCCEEDED", payload={"activated_at": moment.isoformat()},
+                started_at=moment.astimezone(timezone.utc).replace(tzinfo=None),
+                finished_at=moment.astimezone(timezone.utc).replace(tzinfo=None))
+            db.add(opening_activation)
+            db.commit()
+        opening_start = datetime.fromisoformat(opening_activation.payload["activated_at"]).astimezone(SH)
         if calendar_check is None and trading_calendar.confirmed_cn_trading_day(moment.date()) is None:
             record_issue(db, category="DATA_MISSING", code="CALENDAR_UNVERIFIED", source="trading_calendar",
                          title="Portfolio workflow trading calendar unavailable",
@@ -922,6 +960,8 @@ def recover_missed(*, now: datetime | None = None, db_factory=SessionLocal,
                                   "run_ids": [r.run_id for r in stale_running]})
         count = 0
         for step, due in _all_due_slots(moment.date()):
+            if step == "INTRADAY_REVIEW" and due.hour == 9 and due.minute < 45 and due < opening_start:
+                continue
             if due < start or due >= moment - timedelta(minutes=2) or (step == "INTRADAY_REVIEW" and due < batch_start):
                 continue
             slot = due.strftime("%H:%M") if step in {"HARD_RISK", "FEATURE_REFRESH", "INTRADAY_REVIEW"} else "DAILY"

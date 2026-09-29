@@ -24,6 +24,8 @@ class ActionProposal(BaseModel):
     confidence: float = Field(ge=0, le=1)
     rationale: str = Field(min_length=3, max_length=1000)
     evidence_refs: list[str] = Field(min_length=1)
+    decision_basis: Literal["OBSERVATION_PRICE", "MARKET_WEAKNESS", "OTHER", "NO_CHANGE"] | None = None
+    stop_relation: Literal["AT_OR_BELOW", "ABOVE", "UNKNOWN"] | None = None
 
     @field_validator("symbol", mode="before")
     @classmethod
@@ -216,3 +218,39 @@ async def run_portfolio_prompt(prompt_id: str, payload: dict, *, db_factory=None
                             schema_validator=validate, db_factory=factory,
                             client_factory=client_factory or AIClient)
     return parse_portfolio_plan(result.content, symbols, trade_date), result
+
+
+FACT_PROMPT_ID = "intraday_review"
+FACT_PROMPT_VERSION = "1.0.4-declared-facts"
+
+
+def seed_fact_prompt(db: Session) -> PromptVersion:
+    """Immutable candidate; deployment activates only after regression validation."""
+    row = db.query(PromptVersion).filter_by(prompt_id=FACT_PROMPT_ID, version=FACT_PROMPT_VERSION).first()
+    if row:
+        return row
+    template = PROMPTS["review"][1] + (
+        " Advice is exclusively for USER_DECLARED positions; paper account holdings and cash "
+        "are not inputs. For EACH proposal copy stop_relation from decision_facts exactly "
+        "and provide decision_basis: OBSERVATION_PRICE only when AT_OR_BELOW, "
+        "MARKET_WEAKNESS for source-backed market reductions, OTHER or NO_CHANGE. "
+        "Compare the supplied current price and observation price numerically; ABOVE never "
+        "means below or breached. AT_OR_BELOW forbids HOLD/ADD/OPEN. UNKNOWN means no "
+        "price assertion. Explain in concise Simplified Chinese. Respect declared_sell_constraints. "
+        "When declared cash is unverified, an ADD can only be a conditional proposal with "
+        "explicit target weight and fresh market support; state cash needs user confirmation. "
+        "Never use absence of paper positions as advice.")
+    input_schema = {"type": "object", "required": ["trade_date", "positions", "evidence"]}
+    output_schema = PortfolioActionPlan.model_json_schema()
+    item = output_schema["$defs"]["ActionProposal"]
+    item["required"] += ["decision_basis", "stop_relation"]
+    for field in ("decision_basis", "stop_relation"):
+        item["properties"][field] = item["properties"][field]["anyOf"][0]
+    row = PromptVersion(prompt_id=FACT_PROMPT_ID, version=FACT_PROMPT_VERSION, system_template=template,
+        input_schema=input_schema, output_schema=output_schema, model_role="FAST",
+        change_reason="Declared-only account scope and deterministic observation-price facts",
+        parent_version=PROMPT_VERSION, status="CANDIDATE",
+        prompt_hash=prompt_digest(FACT_PROMPT_ID, FACT_PROMPT_VERSION, template, input_schema, output_schema, "FAST"))
+    db.add(row)
+    db.commit()
+    return row

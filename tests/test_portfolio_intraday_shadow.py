@@ -74,9 +74,12 @@ def test_risk_off_old_reduce_and_new_hold_have_real_causal_times(monkeypatch, la
         }
 
     async def model_prompt(_prompt_id, payload, **_kwargs):
+        assert "paper_account" not in payload["evidence"]
+        assert payload["evidence"]["account_scope"] == "USER_DECLARED"
         plan = PortfolioActionPlan.model_validate({
             "trade_date": payload["trade_date"], "portfolio_rationale": "Hold pending evidence",
             "proposals": [{"market": "CN", "symbol": "600001", "action": "HOLD",
+                           "decision_basis": "NO_CHANGE", "stop_relation": "UNKNOWN",
                            "confidence": 0.7, "rationale": "No stock-level exit proof",
                            "evidence_refs": ["macro:fixture"]}],
         })

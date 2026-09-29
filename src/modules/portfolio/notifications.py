@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from src.modules.portfolio.discipline import logical_hash
 from src.modules.portfolio.issue_ledger import record_issue
 from src.modules.portfolio.lark_transport import LarkNotifier as NotifierManager
-from src.platform.persistence.models import NotifyChannel, PortfolioDecision, PortfolioNotification
+from src.platform.persistence.models import (NotifyChannel, PortfolioDecision, PortfolioNotification,
+                                             Stock, PortfolioTruthPosition)
 
 SH = ZoneInfo("Asia/Shanghai")
-TEMPLATE_VERSION = "portfolio-text-v2-candidate"
+TEMPLATE_VERSION = "portfolio-text-v3-stock-name"
 TERMINAL = {"SENT_ACCEPTED", "DELIVERY_UNKNOWN", "CANCELLED", "EXPIRED", "SUPPRESSED"}
 
 
@@ -48,6 +50,31 @@ def recover_notification_outbox(db_factory) -> dict:
     return counts
 
 
+def named_stock_text(db, text: str, symbol: str | None = None) -> str:
+    """Resolve names locally for new messages, retaining symbol identity."""
+    if symbol and re.fullmatch(r"(?:sh|sz|bj)\d{6}", symbol):
+        symbol = symbol[-6:]
+    symbols = set(re.findall(r"(?<!\d)\d{6}(?!\d)", text))
+    if symbol:
+        symbols.add(symbol)
+    for code in sorted(symbols):
+        stock = db.query(Stock).filter_by(market="CN", symbol=code).first()
+        history = None if stock else (db.query(PortfolioTruthPosition).filter_by(market="CN", symbol=code)
+                                     .order_by(PortfolioTruthPosition.id.desc()).first())
+        name = stock.name if stock else history.name if history else None
+        if not name:
+            if code != symbol:
+                continue  # A six-digit amount or identifier is not necessarily a stock.
+            name = "名称待核实"
+        if name in text:
+            continue
+        if code in text:
+            text = re.sub(r"(?<![a-zA-Z0-9])(?:sh|sz|bj)?" + re.escape(code) + r"(?!\d)", lambda _: f"{name}（{code}）", text)
+        elif code == symbol:
+            text = f"{name}（{code}）｜{text}"
+    return text
+
+
 def enqueue_portfolio_notice(db, *, key: str, title: str, content: str,
                              trade_date: str | None = None, symbol: str | None = None,
                              decision: PortfolioDecision | None = None,
@@ -58,6 +85,8 @@ def enqueue_portfolio_notice(db, *, key: str, title: str, content: str,
     existing = db.query(PortfolioNotification).filter_by(semantic_key=key).first()
     if existing:
         return existing, False
+    title = named_stock_text(db, title, symbol)
+    content = named_stock_text(db, content, symbol)
     notification = PortfolioNotification(
         id=uuid.uuid4().hex, semantic_key=key,
         trade_date=trade_date or datetime.now(SH).date().isoformat(), symbol=symbol,

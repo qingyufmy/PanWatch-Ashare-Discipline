@@ -26,7 +26,10 @@ def record_position_decision(db: Session, signal: SignalEvent, *,
     This function neither calls a model nor sends a message. The caller commits
     proposal, Policy result, decision and outbox in one transaction.
     """
-    if signal.action not in HELD_ACTIONS or signal.status not in {"APPROVED", "REVIEW_REQUIRED"}:
+    allowed = {"APPROVED", "REVIEW_REQUIRED"}
+    if signal.source == "intraday_portfolio_plan":
+        allowed.add("POLICY_REJECTED")  # Supersede stale advice with an explicit blocked revision.
+    if signal.action not in HELD_ACTIONS or signal.status not in allowed:
         return None, None
     timestamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(tzinfo=None)
     if signal.expires_at <= timestamp or signal.generated_at > timestamp:

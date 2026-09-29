@@ -131,3 +131,22 @@ def test_restart_and_expiration_are_audited_without_send(monkeypatch):
         assert db.get(PortfolioNotification, interrupted_id).delivery_status == "DELIVERY_UNKNOWN"
         assert db.get(PortfolioNotification, expired_id).delivery_status == "EXPIRED"
     engine.dispose()
+
+
+def test_stock_name_symbol_and_history_deduplication():
+    from src.platform.persistence.models import Stock
+    engine = create_engine("sqlite:///:memory:"); Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    with factory() as db:
+        db.add(Stock(symbol="600206", name="有研新材", market="CN")); db.commit()
+        row, created = enqueue_portfolio_notice(db, key="named-test", title="风险复核｜600206",
+            content="现价触及观察价，请核对", symbol="600206")
+        assert created and "有研新材（600206）" in row.title and "有研新材（600206）" in row.body
+        digest = row.rendered_content_hash
+        same, created = enqueue_portfolio_notice(db, key="named-test", title="different", content="different", symbol="600206")
+        assert not created and same.rendered_content_hash == digest
+        assert "different" not in same.body
+        from src.modules.portfolio.notifications import named_stock_text
+        assert named_stock_text(db, "编号 123456") == "编号 123456"
+        assert named_stock_text(db, "sh600206", "sh600206") == "有研新材（600206）"
+    engine.dispose()

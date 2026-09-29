@@ -34,6 +34,7 @@ def test_simulated_day_all_slots_are_unique_and_replay_is_idempotent():
     day = date(2026, 9, 23)
     slots = _all_due_slots(day)
     assert len(slots) > 250
+    assert all(("INTRADAY_REVIEW", datetime(2026, 9, 23, 9, minute, tzinfo=SH)) in slots for minute in (30,35,40,45))
     assert ("HARD_RISK", datetime(2026, 9, 23, 14, 55, tzinfo=SH)) in slots
     assert ("HARD_RISK", datetime(2026, 9, 23, 15, 0, tzinfo=SH)) in slots
     assert len({(step, at.strftime("%H:%M") if step in {"HARD_RISK", "FEATURE_REFRESH", "INTRADAY_REVIEW"} else "DAILY")

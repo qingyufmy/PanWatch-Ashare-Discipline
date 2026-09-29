@@ -21,9 +21,10 @@ from src.platform.persistence.models import (
     SecurityRule,
 )
 from src.platform.scheduling.trading_calendar import next_confirmed_cn_trading_day
+from src.modules.portfolio.proposal_integrity import evidence_errors
 
 
-POLICY_VERSION = "p3-v2-candidate"
+POLICY_VERSION = "p3-v3-declared-facts"
 RULE_IDS = (
     "SIGNAL_TTL", "ACTION_RESOLUTION", "SCHEMA_INVALID", "MODEL_CONFLICT", "DATA_FRESHNESS",
     "PORTFOLIO_TRUTH", "SECURITY_RULES", "MAX_POSITION", "THESIS_INVALID", "STOP_WIDENING",
@@ -98,7 +99,9 @@ def evaluate_signal(
     schema_valid = payload.get("schema_valid", meta.get("schema_valid")) is True
     decide("SCHEMA_INVALID", "PASS" if schema_valid else "REVIEW", "SCHEMA_NOT_ATTESTED" if not schema_valid else "")
     conflict = bool(payload.get("model_conflict", meta.get("model_conflict", False)))
-    decide("MODEL_CONFLICT", "REVIEW" if conflict else "PASS", "MODEL_CONFLICT" if conflict else "")
+    integrity_errors = evidence_errors(payload, action=signal.action, price=current_price, stop=old_stop) if payload.get("decision_contract") or signal.source == "intraday_portfolio_plan" else []
+    decide("MODEL_CONFLICT", "BLOCK" if conflict or integrity_errors else "PASS",
+           ";".join(integrity_errors) or ("MODEL_CONFLICT" if conflict else ""))
     fresh_quote = bool(
         market_asof and market_source and current_price and current_price > 0
         and -30 <= (timestamp - market_asof).total_seconds() <= quote_ttl_seconds

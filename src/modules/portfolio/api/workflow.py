@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from src.modules.portfolio.proposal_integrity import evidence_errors
 from src.modules.portfolio.daily_workflow import FIXED_STEPS, INTRADAY_BATCHES
 from src.modules.portfolio.premarket_briefing import briefing_for_plan
 from src.platform.scheduling.trading_calendar import confirmed_cn_trading_day
@@ -13,7 +14,7 @@ from src.platform.persistence.database import get_db
 from src.platform.persistence.models import (
     DailyPortfolioPlan, EvidenceSnapshot, PortfolioDecision, PortfolioNotification,
     PortfolioRiskObservation, PortfolioWorkflowRun,
-    SignalEvent, ModelRun, PaperPortfolioFill,
+    SignalEvent, ModelRun, PaperPortfolioFill, AppSettings,
 )
 
 router = APIRouter()
@@ -28,9 +29,11 @@ def runtime(db: Session = Depends(get_db)):
     ).order_by(PortfolioWorkflowRun.started_at.desc()).first()
     scan = db.query(PortfolioWorkflowRun).filter_by(trade_date=day, step="PAPER_SCAN").order_by(
         PortfolioWorkflowRun.started_at.desc()).first()
-    return {"trade_date": day, "batch": {"status": batch.status,
+    annotation = db.query(AppSettings).filter_by(key="paper_performance_integrity_notice").first()
+    return {"performance_notice": annotation.value if annotation else None, "trade_date": day, "batch": {"status": batch.status,
         "started_at": _utc_iso(batch.started_at), "finished_at": _utc_iso(batch.finished_at),
         "reason": (batch.payload or {}).get("reason"),
+        "blocked_proposal_count": (batch.payload or {}).get("blocked_proposal_count", 0),
         "coverage": len((batch.payload or {}).get("signal_ids", []))} if batch else None,
         "paper_scan": {"finished_at": _utc_iso(scan.finished_at), **(scan.payload or {})} if scan else None,
         "paper_fills_today": db.query(PaperPortfolioFill).filter_by(trade_date=day).count()}
@@ -154,10 +157,15 @@ def current_advice(db: Session = Depends(get_db)):
         evidence = db.get(EvidenceSnapshot, signal.evidence_snapshot_id) if signal else None
         payload = evidence.payload if evidence and isinstance(evidence.payload, dict) else {}
         model = db.get(ModelRun, payload.get("model_run_id")) if payload.get("model_run_id") else None
+        if signal and signal.source == "intraday_portfolio_plan" and evidence_errors(payload, action=signal.action):
+            result[row.symbol].update(action="DATA_UNKNOWN", reason="模型价格事实或账户范围未通过核查，本条建议已拦截")
+            continue
         if (signal and signal.source == "intraday_portfolio_plan"
                 and signal.action in {"ADD", "REDUCE", "EXIT"} and signal.qty_hint
                 and model and model.status == "OK" and model.schema_valid
-                and payload.get("schema_valid") is True):
+                and payload.get("schema_valid") is True
+                and not evidence_errors(payload, action=signal.action)
+                and signal.status in {"APPROVED", "REVIEW_REQUIRED"}):
             result[row.symbol].update(action="PROPOSAL_" + signal.action,
                 reason=payload.get("rationale"), source="portfolio_proposal",
                 proposed_qty=signal.qty_hint, target_weight=signal.target_weight)

@@ -18,6 +18,8 @@ from sqlalchemy.orm import Session
 
 from src.modules.strategy.backtest.cost_model import CostModel
 from src.platform.scheduling import trading_calendar
+from src.modules.portfolio.proposal_integrity import evidence_errors, price_fact
+from src.modules.portfolio.policy_gate import RULE_IDS
 from src.platform.persistence.models import (
     AppSettings, EvidenceSnapshot, ModelRun, PaperPortfolioFill, PaperPortfolioNav,
     PaperTradingAccount, PaperTradingPosition, PaperTradingTrade,
@@ -203,6 +205,19 @@ def _scan_portfolio_paper(db: Session, account: PaperTradingAccount, *,
             continue
         evidence = db.get(EvidenceSnapshot, signal.evidence_snapshot_id)
         payload = evidence.payload if evidence and isinstance(evidence.payload, dict) else {}
+        if evidence_errors(payload, action=signal.action):
+            skip(signal, "PROPOSAL_FACT_OR_SCOPE_INVALID")
+            continue
+        current_plan = (db.query(PositionPlan).filter_by(market="CN", symbol=signal.symbol)
+                        .order_by(PositionPlan.version.desc()).first())
+        current_stop = ((current_plan.plan or {}).get("risk") or {}).get("current_stop") if current_plan else None
+        if not current_plan or current_plan.version != signal.plan_version:
+            skip(signal, "PLAN_CHANGED_OR_MISSING")
+            continue
+        if ((payload.get("model_proposal") or {}).get("decision_basis") == "OBSERVATION_PRICE"
+                and price_fact(price, current_stop)["stop_relation"] != "AT_OR_BELOW"):
+            skip(signal, "OBSERVATION_TRIGGER_NO_LONGER_VALID")
+            continue
         confidence = payload.get("confidence")
         model = db.get(ModelRun, payload.get("model_run_id")) if payload.get("model_run_id") else None
         if (payload.get("schema_valid") is not True or
@@ -220,7 +235,7 @@ def _scan_portfolio_paper(db: Session, account: PaperTradingAccount, *,
                 skip(signal, "AUCTION_EVIDENCE_MISSING")
                 continue
         verdicts = db.query(SignalPolicyDecision).filter_by(signal_id=signal.signal_id).all()
-        if len(verdicts) < 13 or any(v.decision in {"BLOCK", "EXPIRED"} for v in verdicts):
+        if not set(RULE_IDS).issubset({v.rule_id for v in verdicts}) or any(v.decision in {"BLOCK", "EXPIRED"} for v in verdicts):
             skip(signal, "POLICY_BLOCKED_OR_INCOMPLETE")
             continue
         day_buys = sum(f.quantity for f in db.query(PaperPortfolioFill).filter_by(

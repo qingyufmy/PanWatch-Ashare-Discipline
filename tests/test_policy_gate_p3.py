@@ -185,3 +185,33 @@ def test_unresolved_agent_rating_is_not_an_approved_hold():
     finally:
         db.close()
         engine.dispose()
+
+
+def test_numeric_contradiction_blocks_policy_and_replaces_older_advice():
+    from src.platform.persistence.models import EvidenceSnapshot, PortfolioDecision
+    from src.modules.portfolio.proposal_integrity import VERSION, SCOPE, price_fact
+    from src.modules.portfolio.decision_router import record_position_decision
+    engine,db,now=_case()
+    try:
+        signal=_signal(db,now,"EXIT",qty=800,price=10.5)
+        signal.source="intraday_portfolio_plan"
+        evidence=db.get(EvidenceSnapshot,signal.evidence_snapshot_id)
+        evidence.payload={**evidence.payload,"decision_contract":VERSION,"account_scope":SCOPE,
+            "decision_fact":price_fact(10.5,9),"model_proposal":{"action":"EXIT","decision_basis":"OBSERVATION_PRICE","stop_relation":"ABOVE","rationale":"现价低于观察价"}}
+        db.commit()
+        evaluate_signal(db,signal.signal_id,now=now)
+        assert signal.status == "POLICY_REJECTED"
+        assert db.query(SignalPolicyDecision).filter_by(signal_id=signal.signal_id,rule_id="MODEL_CONFLICT").one().decision == "BLOCK"
+        assert db.get(ActionableSignal,signal.signal_id) is None
+        # Normalize the fixture truth symbol as the real workflow stores it.
+        truth=db.query(PortfolioTruthPosition).one();truth.symbol="600001";db.commit()
+        old=PortfolioDecision(trade_date=signal.trade_date,market="CN",symbol="600001",revision=1,
+            signal_id="old",action="HOLD",decision_status="APPROVED",risk_status="UNVERIFIED",
+            data_status="FRESH",execution_status="NOT_EXECUTED",semantic_hash="old",current=True,
+            created_at=now.replace(tzinfo=None)-timedelta(minutes=1),expires_at=now.replace(tzinfo=None)+timedelta(minutes=5))
+        db.add(old);db.commit()
+        decision,notice=record_position_decision(db,signal,now=now)
+        assert old.current is False and decision.current is True
+        assert decision.decision_status == "POLICY_REJECTED" and notice is None
+    finally:
+        db.close();engine.dispose()

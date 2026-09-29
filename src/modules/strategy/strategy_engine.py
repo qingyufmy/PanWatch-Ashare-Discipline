@@ -1252,17 +1252,19 @@ def refresh_strategy_signals(
             .filter(StrategySignalRun.snapshot_date == snapshot)
             .all()
         )
-        existing: dict[tuple[int, str], StrategySignalRun] = {}
+        # Candidate rows are rebuilt; SQLite may reuse their integer IDs.
+        # Keep the security identity in the key so one stock never inherits another's prices.
+        existing: dict[tuple[str, str, str], StrategySignalRun] = {}
         for row in existing_rows:
             cand_id = row.source_candidate_id
             code = row.strategy_code
             if cand_id is None:
                 continue
-            existing[(int(cand_id), str(code or ""))] = row
+            existing[(row.stock_market, row.stock_symbol, str(code or ""))] = row
 
         weight_cache: dict[str, dict[str, float]] = {}
         factor_weight_cache: dict[str, dict[str, float]] = {}
-        touched_keys: set[tuple[int, str]] = set()
+        touched_keys: set[tuple[str, str, str]] = set()
         touched_rows: list[StrategySignalRun] = []
 
         for c in candidates:
@@ -1337,7 +1339,7 @@ def refresh_strategy_signals(
                     "cross_feature": cross_features.get(int(c.id)) if c.id is not None else {},
                     "news_metric": normalized_news_metric,
                 }
-                key = (int(c.id), str(code))
+                key = (market, c.stock_symbol, str(code))
                 row = existing.get(key)
                 if not row:
                     row = StrategySignalRun(
@@ -1351,6 +1353,8 @@ def refresh_strategy_signals(
                     db.add(row)
                     existing[key] = row
 
+                row.source_candidate_id = c.id
+                row.stock_name = c.stock_name or c.stock_symbol
                 row.strategy_name = strategy_name
                 row.strategy_version = strategy_version
                 row.risk_level = risk_level
@@ -1472,7 +1476,14 @@ def list_strategy_signals(
         if not snapshot:
             return {"snapshot_date": "", "count": 0, "items": []}
 
-        q = db.query(StrategySignalRun).filter(StrategySignalRun.snapshot_date == snapshot)
+        # Do not expose archived rows whose reused candidate ID now points to
+        # another stock. Preserve the original database evidence for diagnosis.
+        q = db.query(StrategySignalRun).join(EntryCandidate, and_(
+            EntryCandidate.id == StrategySignalRun.source_candidate_id,
+            EntryCandidate.stock_symbol == StrategySignalRun.stock_symbol,
+            EntryCandidate.stock_market == StrategySignalRun.stock_market,
+            EntryCandidate.snapshot_date == StrategySignalRun.snapshot_date,
+        )).filter(StrategySignalRun.snapshot_date == snapshot)
         mkt = (market or "").strip().upper()
         if mkt:
             q = q.filter(StrategySignalRun.stock_market == mkt)

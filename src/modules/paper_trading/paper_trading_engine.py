@@ -684,6 +684,10 @@ class PaperTradingEngine:
             if not account.enabled:
                 return {"status": "disabled"}
 
+            from src.modules.paper_trading.portfolio_paper import paper_mode, scan_portfolio_paper
+            if paper_mode(db):
+                return scan_portfolio_paper(db, account)
+
             opened, new_keys, entry_events = self._check_entries(db, account)
             closed, exit_events = self._check_exits(db, account, skip_keys=new_keys)
 

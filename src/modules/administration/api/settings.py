@@ -56,6 +56,7 @@ SETTING_DESCRIPTIONS = {
     "notify_dedupe_ttl_overrides": "通知幂等窗口覆盖（JSON，空为默认）",
     "stock_link_platform": "股票链接平台（点击股票代码跳转的行情网站）",
     "panwatch_base_url": "PanWatch 公开访问地址（用于通知里的分析详情页链接，如 https://panwatch.example.com）",
+    "portfolio_discipline_mode": "持仓通知主链模式（disabled/enabled；仅在回放与人工验收后启用）",
 }
 
 SETTING_KEYS = list(SETTING_DESCRIPTIONS.keys())
@@ -72,6 +73,7 @@ def _get_env_defaults() -> dict[str, str]:
         "notify_dedupe_ttl_overrides": s.notify_dedupe_ttl_overrides,
         "stock_link_platform": "xueqiu",
         "panwatch_base_url": os.getenv("PANWATCH_BASE_URL", ""),
+        "portfolio_discipline_mode": "disabled",
     }
 
 
@@ -181,6 +183,8 @@ def set_avatar(update: SettingUpdate, db: Session = Depends(get_db)):
 
 @router.put("/{key}", response_model=SettingResponse)
 def update_setting(key: str, update: SettingUpdate, db: Session = Depends(get_db)):
+    if key == "portfolio_discipline_mode" and update.value not in {"disabled", "enabled"}:
+        raise HTTPException(400, "portfolio_discipline_mode must be disabled or enabled")
     setting = db.query(AppSettings).filter(AppSettings.key == key).first()
     if not setting:
         desc = SETTING_DESCRIPTIONS.get(key, "")

@@ -29,6 +29,8 @@ class AIClient:
         self.total_tokens_used = 0
         self.last_usage = None
         self.last_reported_model = None
+        self.last_finish_reason = None
+        self.last_reasoning_tokens = None
 
     async def chat(
         self,
@@ -99,6 +101,7 @@ class AIClient:
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
         thinking: str | None = None,
+        response_format: dict | None = None,
     ) -> str:
         """
         多轮对话：传入完整 messages 列表。
@@ -118,6 +121,8 @@ class AIClient:
                 create_kwargs["reasoning_effort"] = reasoning_effort
             if thinking in {"enabled", "disabled"}:
                 create_kwargs["extra_body"] = {"thinking": {"type": thinking}}
+            if response_format is not None:
+                create_kwargs["response_format"] = response_format
             with otel.llm_span(self.model, operation="chat") as _span:
                 response = await self.client.chat.completions.create(**create_kwargs)
                 self.last_reported_model = getattr(response, "model", None)
@@ -133,6 +138,9 @@ class AIClient:
                         f"Token usage: {response.usage.prompt_tokens} + "
                         f"{response.usage.completion_tokens} = {response.usage.total_tokens}"
                     )
+            self.last_finish_reason = response.choices[0].finish_reason
+            details = getattr(response.usage, "completion_tokens_details", None)
+            self.last_reasoning_tokens = getattr(details, "reasoning_tokens", None)
             return response.choices[0].message.content or ""
         except Exception as e:
             logger.error(f"AI 多轮对话调用失败: {e}")

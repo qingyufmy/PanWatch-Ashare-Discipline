@@ -14,7 +14,7 @@ from src.modules.portfolio.signal_journal import (
 )
 from src.platform.persistence.database import Base
 from src.platform.persistence.models import (
-    Account, ActionableSignal, DisciplineEvent, EvidenceSnapshot, NextDayAction, Position,
+    Account, ActionableSignal, DisciplineEvent, EvidenceSnapshot, ExecutionEvent, NextDayAction, Position,
     SignalEvent, SignalLifecycleEvent, Stock, StockSuggestion,
 )
 from src.platform.scheduling import trading_calendar
@@ -153,4 +153,53 @@ def test_saved_suggestion_and_signal_commit_together(monkeypatch):
             assert evidence.payload["prompt_context"] == "frozen input"
             assert evidence.payload["ai_response"] == "frozen output"
     finally:
+        engine.dispose()
+
+
+def test_proposal_reversal_is_append_only_before_notification_dedupe(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(suggestion_pool, "SessionLocal", sessionmaker(bind=engine))
+    try:
+        for action in ("sell", "hold", "sell"):
+            result = suggestion_pool.save_suggestion_result(
+                stock_symbol="sh600001", stock_name="测试", stock_market="CN",
+                action=action, action_label=action, agent_name="intraday_monitor",
+                reason="frozen evidence", prompt_context="input", ai_response="output",
+            )
+            assert result.persisted and result.signal_id
+        with Session(engine) as db:
+            assert [s.action for s in db.query(StockSuggestion).order_by(StockSuggestion.id)] == [
+                "sell", "hold", "sell",
+            ]
+            assert db.query(SignalEvent).count() == 3
+    finally:
+        engine.dispose()
+
+
+def test_manual_execution_request_is_idempotent_and_cumulative_qty_is_bounded():
+    engine, db = _db()
+    try:
+        now = datetime.now(timezone.utc)
+        signal, _ = record_signal(db, market="CN", symbol="sh600001", action="REDUCE",
+                                  source="test", evidence={"fixture": "manual"},
+                                  ttl_seconds=300, qty_hint=100, generated_at=now)
+        db.add(ActionableSignal(signal_id=signal.signal_id, approved_qty=100, policy_version="fixture",
+                                input_hash="fixture", approved_at=now.replace(tzinfo=None)))
+        db.flush()
+        transition_signal(db, signal.signal_id, "APPROVED", reason="fixture")
+        first = record_manual_execution(db, signal_id=signal.signal_id, actual_action="REDUCE",
+                                        actual_qty=60, actual_price=10.0, executed_at=now,
+                                        client_request_id="fixture-request-1")
+        repeated = record_manual_execution(db, signal_id=signal.signal_id, actual_action="REDUCE",
+                                           actual_qty=60, actual_price=10.0, executed_at=now,
+                                           client_request_id="fixture-request-1")
+        assert repeated.execution_id == first.execution_id
+        second = record_manual_execution(db, signal_id=signal.signal_id, actual_action="REDUCE",
+                                         actual_qty=50, actual_price=10.0, executed_at=now,
+                                         client_request_id="fixture-request-2")
+        assert second.result == "USER_REPORTED_OUT_OF_POLICY"
+        assert db.query(ExecutionEvent).count() == 2
+    finally:
+        db.close()
         engine.dispose()

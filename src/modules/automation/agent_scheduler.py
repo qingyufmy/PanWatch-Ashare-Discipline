@@ -1,6 +1,8 @@
 import logging
 import time
+from datetime import datetime
 from typing import Callable, Awaitable
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -11,6 +13,7 @@ from src.platform.observability.log_context import log_context
 from src.platform.observability import otel
 from src.platform.marketdata.models import MARKETS
 from src.platform.scheduling.schedule_parser import parse_schedule
+from src.platform.scheduling.trading_calendar import confirmed_cn_trading_day
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +74,22 @@ class AgentScheduler:
         agent = self.agents.get(agent_name)
         if not agent:
             logger.error(f"Agent 未找到: {agent_name}")
+            return
+
+        day = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        session = confirmed_cn_trading_day(day)
+        if session is not True:
+            reason = "NON_TRADING_DAY" if session is False else "CALENDAR_UNVERIFIED"
+            logger.info("[调度] 跳过 %s：%s (%s)", agent.display_name, reason, day)
+            record_agent_run(agent_name=agent_name, status="skipped",
+                             result=reason, trigger_source="schedule")
+            return
+
+        replaced = {"premarket_outlook": "portfolio_PREMARKET_PLAN", "daily_report": "portfolio_DAILY_REVIEW",
+                    "intraday_monitor": "portfolio_INTRADAY_REVIEW_10"}
+        if agent_name in replaced and self.scheduler.get_job(replaced[agent_name]) is not None:
+            record_agent_run(agent_name=agent_name, status="skipped",
+                             result="SUPERSEDED_BY_PORTFOLIO_WORKFLOW", trigger_source="schedule")
             return
 
         start = time.monotonic()

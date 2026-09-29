@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from src.platform.persistence.models import (
     ActionableSignal, ExecutionEvent, ModelRun, PortfolioWorkflowRun,
     PromptVersion, SignalEvent, SignalPolicyDecision, SystemIssue,
+    SignalLifecycleEvent,
 )
 
 
@@ -41,8 +42,14 @@ def acceptance_metrics(db: Session, *, since: datetime) -> dict:
     traceable = sum(bool((s := by_id.get(a.signal_id)) and s.trace_id and s.truth_snapshot_id
                          and s.plan_version and s.evidence_snapshot_id and s.prompt_version
                          and s.requested_model and a.signal_id in policies) for a in actionable)
-    stale_actionable = sum(bool((s := by_id.get(a.signal_id)) and
-                                (s.status != "ACTIONABLE" or s.expires_at < a.approved_at)) for a in actionable)
+    approved_lifecycle = {e.signal_id: e.occurred_at for e in db.query(SignalLifecycleEvent)
+                          .filter_by(to_status="APPROVED").all()}
+    stale_actionable = sum(bool(
+        (s := by_id.get(a.signal_id)) is None
+        or s.valid_from > a.approved_at or s.expires_at <= a.approved_at
+        or a.signal_id not in approved_lifecycle
+        or approved_lifecycle[a.signal_id] > a.approved_at
+    ) for a in actionable)
     stop_widening = sum(bool(s.reason_codes and "STOP_WIDENING" in s.reason_codes) for s in signals
                         if s.signal_id in {a.signal_id for a in actionable})
     return {
@@ -55,7 +62,8 @@ def acceptance_metrics(db: Session, *, since: datetime) -> dict:
         "policy_bypass": sum(a.signal_id not in policies for a in actionable),
         "duplicate_actionable": int(duplicate),
         "schema_success": _ratio(sum(m.schema_valid is True for m in models), len(models)),
-        "critical_scheduler_missed": sum(r.status in {"MISSED", "FAILED"} for r in fixed),
+        "critical_scheduler_missed": sum(r.status in {"MISSED", "FAILED"} for r in rows
+                                         if r.step != "ACTIVATED"),
         "eod_reconcile": _ratio(sum(e.reconcile_status == "RECONCILED" for e in executions), len(executions)),
         "stop_widening": int(stop_widening),
         "fast_p95_seconds": _p95(fast_latency),
@@ -73,7 +81,8 @@ def acceptance_gate(metrics: dict) -> dict:
         "policy_bypass=0": n["actionable"] > 0 and metrics["policy_bypass"] == 0,
         "duplicate_actionable=0": n["actionable"] > 0 and metrics["duplicate_actionable"] == 0,
         "schema_success>=99%": n["model_runs"] > 0 and metrics["schema_success"] is not None and metrics["schema_success"] >= .99,
-        "critical_scheduler_missed=0": n["fixed_runs"] > 0 and metrics["critical_scheduler_missed"] == 0,
+        "critical_scheduler_missed=0": (n["fixed_runs"] + n["risk_runs"] > 0
+                                         and metrics["critical_scheduler_missed"] == 0),
         "eod_reconcile=100%": n["executions"] > 0 and metrics["eod_reconcile"] == 1 and metrics["eod_run_count"] > 0,
         "stop_widening=0": n["actionable"] > 0 and metrics["stop_widening"] == 0,
         "FAST_P95<20s": metrics["fast_p95_seconds"] is not None and metrics["fast_p95_seconds"] < 20,

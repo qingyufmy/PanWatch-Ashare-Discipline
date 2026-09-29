@@ -16,13 +16,13 @@ from src.modules.portfolio.discipline import current_plan, logical_hash
 from src.platform.scheduling.trading_calendar import next_confirmed_cn_trading_day
 from src.platform.persistence.models import (
     ActionableSignal, EvidenceSnapshot, SignalEvent, SignalLifecycleEvent,
-    ExecutionEvent, DisciplineEvent, NextDayAction,
+    ExecutionEvent, DisciplineEvent, NextDayAction, PortfolioDecision,
     PortfolioTruthSnapshot,
     DailyPortfolioPlan,
 )
 
 
-ACTIONS = frozenset({"OPEN", "ADD", "HOLD", "REDUCE", "EXIT"})
+ACTIONS = frozenset({"OPEN", "ADD", "HOLD", "REDUCE", "EXIT", "REVIEW"})
 TERMINAL = frozenset({"POLICY_REJECTED", "EXECUTED", "IGNORED", "EXPIRED", "OVERRIDDEN", "CANCELLED"})
 LIFECYCLE = frozenset({
     "GENERATED", "POLICY_REJECTED", "REVIEW_REQUIRED", "APPROVED",
@@ -153,7 +153,7 @@ def transition_signal(
 def record_manual_execution(
     db: Session, *, signal_id: str, actual_action: str,
     actual_qty: int, actual_price: float | None,
-    executed_at: datetime, notes: str = "",
+    executed_at: datetime, notes: str = "", client_request_id: str | None = None,
 ) -> ExecutionEvent:
     """Record a user's claimed trade for later reconciliation, never send an order."""
     signal = db.get(SignalEvent, signal_id)
@@ -163,16 +163,28 @@ def record_manual_execution(
         raise ValueError("invalid_execution")
     if actual_price is not None and actual_price <= 0:
         raise ValueError("invalid_execution_price")
+    if client_request_id:
+        if len(client_request_id) > 64 or len(client_request_id) < 8:
+            raise ValueError("invalid_client_request_id")
+        prior_request = db.query(ExecutionEvent).filter_by(client_request_id=client_request_id).first()
+        if prior_request:
+            if (prior_request.signal_id, prior_request.actual_action, prior_request.actual_qty,
+                    prior_request.actual_price) != (signal_id, actual_action, actual_qty, actual_price):
+                raise ValueError("client_request_id_payload_mismatch")
+            return prior_request
     approved = db.get(ActionableSignal, signal_id)
+    prior_qty = sum(e.actual_qty for e in db.query(ExecutionEvent).filter_by(signal_id=signal_id).all()
+                    if e.actual_action == actual_action and e.result == "USER_REPORTED")
     authorized = bool(
         approved and signal.status in {"APPROVED", "EXECUTION_PENDING"}
         and actual_action == signal.action
         and approved.approved_qty is not None
-        and actual_qty <= approved.approved_qty
+        and prior_qty + actual_qty <= approved.approved_qty
     )
     executed = utc_naive(executed_at)
     event = ExecutionEvent(
         execution_id=uuid.uuid4().hex, signal_id=signal_id,
+        client_request_id=client_request_id,
         planned_action=signal.action,
         planned_qty=approved.approved_qty if approved else signal.qty_hint,
         planned_weight=approved.approved_weight if approved else signal.target_weight,
@@ -184,6 +196,24 @@ def record_manual_execution(
         reconcile_status="PENDING",
     )
     db.add(event)
+    if authorized:
+        current_decision = (db.query(PortfolioDecision).filter_by(
+            signal_id=signal_id, current=True).order_by(PortfolioDecision.id.desc()).first())
+        if current_decision and current_decision.expires_at > utc_naive(datetime.now(timezone.utc)):
+            from src.modules.portfolio.notifications import enqueue_portfolio_notice
+            remaining = approved.approved_qty - prior_qty - actual_qty
+            current_decision.execution_status = "USER_REPORTED_UNRECONCILED"
+            action_label = {"OPEN": "建仓", "ADD": "加仓", "REDUCE": "减仓", "EXIT": "清仓离场"}[actual_action]
+            enqueue_portfolio_notice(
+                db, key=f"execution:{event.execution_id}",
+                title=f"{action_label}｜{signal.symbol}｜用户执行登记",
+                content=(f"用户报告本次{actual_action} {actual_qty}股；累计报告"
+                         f"{prior_qty + actual_qty}股；原批准上限内尚余{remaining}股。\n"
+                         "这是用户登记，尚未经券商成交核对；再次行动前需重新核对持仓、可卖数量、价格和当前决策。"),
+                trade_date=signal.trade_date, symbol=signal.symbol,
+                decision=current_decision, signal_ids=[signal_id],
+                reason="EXECUTION_UPDATE", expires_at=current_decision.expires_at,
+            )
     db.add(DisciplineEvent(
         signal_id=signal_id,
         event_type="MANUAL_EXECUTION_RECORDED" if authorized else "UNAUTHORIZED_ACTION",

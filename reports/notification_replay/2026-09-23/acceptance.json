@@ -1,0 +1,32 @@
+{
+  "date": "2026-09-23",
+  "code_repair": "IMPLEMENTED_IN_ISOLATED_BRANCH",
+  "synthetic_replay": "PASS_WITH_LIMITS",
+  "new_version_natural_trading_day": "NOT_OBSERVED",
+  "approved_production_release": false,
+  "checks": {
+    "batch_event_gate_20_quiet_0_model": "PASS",
+    "batch_event_gate_1_changed_1_model": "PASS",
+    "persist_and_policy_before_action_notice": "PASS",
+    "review_unknown_not_hold": "PASS",
+    "eastmoney_lots_and_vwap": "PASS",
+    "fixed_clock_missing_minute": "PASS",
+    "historical_ma20_warmup": "PASS",
+    "prior_frozen_support": "PASS",
+    "per_position_action_reversal": "PASS",
+    "outbox_success_failure_timeout_restart_expiry": "PASS",
+    "manual_execution_remaining_and_idempotency": "PASS",
+    "public_archive_allowlist": "PASS",
+    "late_session_hard_risk_schedule": "PASS",
+    "true_lark_message_rate": "NOT_OBSERVED",
+    "broker_verified_truth_and_security_master": "NOT_OBSERVED",
+    "candidate_shadow_natural_day": "NOT_OBSERVED",
+    "production_p95": "NOT_OBSERVED",
+    "p10_natural_day_gate": "FAIL_CLOSED_BASELINE"
+  },
+  "blocking_reasons": [
+    "11只持仓的券商Truth、现金及证券规则未获核实",
+    "候选Prompt/Policy/模板尚未经历真实交易日Shadow和消息人工审阅",
+    "当日旧版P10门禁为FAIL_CLOSED，不能据隔离样本标记PROD"
+  ]
+}

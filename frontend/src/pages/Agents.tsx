@@ -1084,8 +1084,8 @@ export default function AgentsPage() {
                 </label>
               </div>
               <div className="text-[11px] text-muted-foreground">
-                启用后,TA 输出 BUY 决策时会写一条 StrategySignalRun,PaperTradingEngine 下个 tick 自动开模拟仓
-                (止损 -5%,止盈 +10%)。<strong>默认关闭</strong> 防止误开仓。SELL 不会自动平仓。
+                启用后，TA 的 BUY 决策会写入通用模拟盘信号。持仓镜像 PAPER_ONLY 模式不会消费这类信号，
+                只执行持仓工作流中通过模拟门禁的明确建议。<strong>默认关闭</strong>。SELL 不会自动平仓。
               </div>
             </section>
 

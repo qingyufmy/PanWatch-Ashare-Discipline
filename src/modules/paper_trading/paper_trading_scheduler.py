@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.modules.paper_trading.paper_trading_engine import ENGINE
-from src.platform.scheduling.trading_calendar import any_market_trading_day
+from src.platform.scheduling.trading_calendar import cn_business_day
 from src.platform.marketdata.models import MARKETS, MarketCode
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,8 @@ class PaperTradingScheduler:
         self._running = False
 
     async def _scan_job(self):
+        if not cn_business_day():
+            return
         if self._running:
             logger.debug("[模拟盘] 上轮扫描仍在执行，跳过本轮")
             return
@@ -57,9 +60,16 @@ class PaperTradingScheduler:
 
     async def _premarket_job(self):
         """盘前计划通知。非交易日(周末/节假日)跳过。"""
-        if not any_market_trading_day():
+        if not cn_business_day():
             logger.debug("[模拟盘] 非交易日,跳过盘前计划通知")
             return
+        # The legacy notifier reports StrategySignalRun candidates, which do not
+        # belong to the portfolio mirror account.
+        from src.platform.persistence.database import SessionLocal
+        from src.modules.paper_trading.portfolio_paper import paper_mode
+        with SessionLocal() as db:
+            if paper_mode(db):
+                return
         try:
             from src.modules.paper_trading.paper_trading_notifier import send_premarket_plan
             await send_premarket_plan()
@@ -68,7 +78,7 @@ class PaperTradingScheduler:
 
     async def _summary_job(self):
         """日终摘要通知。非交易日(周末/节假日)跳过。"""
-        if not any_market_trading_day():
+        if not cn_business_day():
             logger.debug("[模拟盘] 非交易日,跳过日终摘要通知")
             return
         try:
@@ -77,13 +87,32 @@ class PaperTradingScheduler:
         except Exception as e:
             logger.exception(f"[模拟盘] 日终摘要通知异常: {e}")
 
+    async def _portfolio_nav_job(self):
+        if not cn_business_day():
+            return
+        from src.modules.paper_trading.portfolio_paper import capture_paper_nav, paper_mode
+        from src.platform.persistence.database import SessionLocal
+        from src.platform.persistence.models import PaperTradingAccount
+
+        def capture():
+            with SessionLocal() as db:
+                if not paper_mode(db):
+                    return {"status": "disabled"}
+                account = db.query(PaperTradingAccount).first()
+                return capture_paper_nav(db, account) if account else {"status": "account_missing"}
+
+        result = await asyncio.to_thread(capture)
+        if result.get("status") not in {"captured", "already_captured",
+                                        "calendar_unverified_or_closed", "disabled"}:
+            logger.warning("[模拟盘] 收盘净值未冻结: %s", result)
+
     def start(self):
         self.scheduler.add_job(
             self._scan_job,
             "interval",
             seconds=self.interval_seconds,
-            jitter=20,  # 抖动错峰,避免与价格提醒扫描每 60s 同刻并发写 SQLite
             id="paper_trading_scan",
+            misfire_grace_time=30,
             replace_existing=True,
             coalesce=True,
             max_instances=1,
@@ -99,16 +128,21 @@ class PaperTradingScheduler:
             coalesce=True,
             max_instances=1,
         )
-        # 日终摘要 - 每天 15:30
+        # 日终摘要 follows the source-dated portfolio NAV freeze.
         self.scheduler.add_job(
             self._summary_job,
             "cron",
             hour=15,
-            minute=30,
+            minute=50,
             id="paper_trading_summary",
             replace_existing=True,
             coalesce=True,
             max_instances=1,
+        )
+        self.scheduler.add_job(
+            self._portfolio_nav_job, "cron", hour=15, minute=45,
+            id="paper_trading_portfolio_nav", replace_existing=True,
+            coalesce=True, max_instances=1,
         )
         self.scheduler.start()
         from src.platform.scheduling.scheduler_registry import register

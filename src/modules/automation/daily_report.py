@@ -370,7 +370,7 @@ class DailyReportAgent(BaseAgent):
             constraints = stock_ctx.get("constraints") or {}
             if constraints:
                 lines.append(
-                    f"- 资金约束：总可用{safe_num(constraints.get('total_available_funds'), 0):.0f}元，单票仓位占比{safe_num(constraints.get('single_position_ratio'), 0) * 100:.1f}%（{constraints.get('risk_budget_hint', 'normal')}）"
+                    f"- 资金约束：账面可用{safe_num(constraints.get('total_available_funds'), 0):.0f}元，单票估算仓位 {constraints.get('single_position_ratio_text', '待核查')}"
                 )
             memory = stock_ctx.get("memory") or {}
             if memory:

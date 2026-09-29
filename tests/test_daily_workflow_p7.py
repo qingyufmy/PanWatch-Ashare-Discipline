@@ -1,7 +1,8 @@
 """P7 simulated trading day, idempotency and missed-slot recovery."""
 
 import asyncio
-from datetime import date, datetime
+import pytest
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
@@ -9,13 +10,13 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from src.modules.portfolio.daily_workflow import (
-    _all_due_slots, _premarket_plan, recover_missed, run_step,
+    _all_due_slots, _premarket_plan, _simple_step, recover_missed, run_step,
 )
 from src.modules.portfolio.model_router import ModelResult
 from src.modules.portfolio.prompt_registry import PortfolioActionPlan
 from src.platform.persistence.database import Base
 from src.platform.persistence.models import (
-    DailyPortfolioPlan, PortfolioTruthPosition, PortfolioTruthSnapshot,
+    DailyPortfolioPlan, ModelRun, PortfolioTruthPosition, PortfolioTruthSnapshot,
     PortfolioWorkflowRun, SignalEvent, SystemIssue,
 )
 
@@ -33,7 +34,10 @@ def test_simulated_day_all_slots_are_unique_and_replay_is_idempotent():
     day = date(2026, 9, 23)
     slots = _all_due_slots(day)
     assert len(slots) > 250
-    assert len({(step, at.strftime("%H:%M") if step in {"HARD_RISK", "FEATURE_REFRESH"} else "DAILY")
+    assert all(("INTRADAY_REVIEW", datetime(2026, 9, 23, 9, minute, tzinfo=SH)) in slots for minute in (30,35,40,45))
+    assert ("HARD_RISK", datetime(2026, 9, 23, 14, 55, tzinfo=SH)) in slots
+    assert ("HARD_RISK", datetime(2026, 9, 23, 15, 0, tzinfo=SH)) in slots
+    assert len({(step, at.strftime("%H:%M") if step in {"HARD_RISK", "FEATURE_REFRESH", "INTRADAY_REVIEW"} else "DAILY")
                 for step, at in slots}) == len(slots)
     invoked = []
 
@@ -56,6 +60,39 @@ def test_simulated_day_all_slots_are_unique_and_replay_is_idempotent():
     engine.dispose()
 
 
+def test_risk_group_a_then_a_b_then_a_does_not_realert_a(monkeypatch):
+    from src.modules.portfolio import daily_workflow
+
+    sequence = [["A"], ["A", "B"], ["A"]]
+    sent = set()
+    attempts = []
+
+    def risk(*_args, **_kwargs):
+        members = sequence.pop(0)
+        return {"status": "SUCCEEDED", "positions": [{
+            "symbol": symbol, "color": "RED", "reason": "HARD_STOP", "price": 10.0,
+            "current_stop": 10.1, "market_data_asof": "2026-09-23T10:00:00+08:00",
+            "market_data_source": "fixture", "plan_version": 1,
+        } for symbol in members]}
+
+    async def notify(**kwargs):
+        attempts.append(kwargs["key"])
+        if kwargs["key"] in sent:
+            return {"status": "SKIPPED"}
+        sent.add(kwargs["key"])
+        return {"status": "SENT"}
+
+    monkeypatch.setattr(daily_workflow, "_risk_scan", risk)
+    monkeypatch.setattr(daily_workflow, "send_portfolio_notice", notify)
+    async def replay():
+        return [await _simple_step("HARD_RISK", "2026-09-23", lambda: None,
+                                   datetime(2026, 9, 23, 10, minute, tzinfo=SH)) for minute in (0, 1, 2)]
+    results = asyncio.run(replay())
+    assert len(attempts) == 4
+    assert len(sent) == 2
+    assert [r["notification"]["status"] for r in results] == ["SENT", "SENT", "SKIPPED"]
+
+
 def test_restart_records_missed_slots_without_backfilling_model_calls():
     engine, factory = _db()
     recover_missed(now=datetime(2026, 9, 22, 22, 0, tzinfo=SH), db_factory=factory,
@@ -70,7 +107,8 @@ def test_restart_records_missed_slots_without_backfilling_model_calls():
     engine.dispose()
 
 
-def test_batch_plan_creates_eleven_review_signals_with_daily_plan_link(monkeypatch):
+@pytest.mark.parametrize("model_fails", [False, True])
+def test_batch_plan_creates_eleven_review_signals_with_daily_plan_link(monkeypatch, model_fails):
     engine, factory = _db()
     with factory() as db:
         truth = PortfolioTruthSnapshot(
@@ -89,6 +127,9 @@ def test_batch_plan_creates_eleven_review_signals_with_daily_plan_link(monkeypat
 
     async def fake_prompt(prompt_id, payload, **kwargs):
         assert len(payload["positions"]) == 11
+        assert len(payload["evidence"]["preparation"]["positions"]) == 11
+        if model_fails:
+            raise TimeoutError("fixture model timeout")
         plan = PortfolioActionPlan.model_validate({
             "trade_date": payload["trade_date"],
             "portfolio_rationale": "Insufficient verified data",
@@ -99,15 +140,61 @@ def test_batch_plan_creates_eleven_review_signals_with_daily_plan_link(monkeypat
         result = ModelResult(content=plan.model_dump_json(), run_id="fixture-run", requested_role="FAST",
                              profile_role="FAST", requested_model="fixture-model",
                              reported_model="fixture-model", degraded=False)
+        with factory() as db:
+            db.add(ModelRun(
+                run_id=result.run_id, trace_id="fixture-trace", role="FAST", profile_role="FAST",
+                requested_model="fixture-model", input_hash="fixture-input", latency_ms=30000,
+                status="OK", schema_valid=True, prompt_id="flash", prompt_version="1.0.0",
+                started_at=datetime(2026, 9, 23, 0, 50),
+                finished_at=datetime(2026, 9, 23, 0, 50, 30),
+            ))
+            db.commit()
         return plan, result
 
+    async def fake_market(*_args, **_kwargs):
+        return {"trade_date": "2026-09-23", "risk_tone": "UNVERIFIED",
+                "completed_at": "2026-09-23T08:50:00+08:00", "holdings": []}
+
+    monkeypatch.setattr("src.modules.portfolio.daily_workflow.collect_market_context", fake_market)
     monkeypatch.setattr("src.modules.portfolio.daily_workflow.run_portfolio_prompt", fake_prompt)
     result = asyncio.run(_premarket_plan("2026-09-23", factory,
-                                         datetime(2026, 9, 23, 8, 50, tzinfo=SH)))
+                                         datetime(2026, 9, 23, 8, 50, tzinfo=SH),
+                                         decision_clock=lambda: datetime(2026, 9, 23, 0, 51, tzinfo=timezone.utc)))
     assert result["status"] == "REVIEW" and result["coverage"] == 11
     with factory() as db:
         assert db.query(DailyPortfolioPlan).count() == 1
         signals = db.query(SignalEvent).all()
-        assert len(signals) == 11
+        assert len(signals) == (0 if model_fails else 11)
+        assert len(db.query(DailyPortfolioPlan).one().payload["preparation"]["positions"]) == 11
+        if model_fails:
+            assert result["reason"] == "MODEL_FAILED_RULE_PREPARATION"
         assert all(s.daily_plan_version == 1 and s.status == "REVIEW_REQUIRED" for s in signals)
+        assert all(s.generated_at >= datetime(2026, 9, 23, 0, 50, 30) for s in signals)
+    engine.dispose()
+
+
+def test_new_batch_slots_only_audited_after_activation():
+    engine, factory = _db()
+    recover_missed(now=datetime(2026, 9, 28, 10, 26, tzinfo=SH), db_factory=factory,
+                   calendar_check=lambda _: True)
+    recover_missed(now=datetime(2026, 9, 28, 10, 34, tzinfo=SH), db_factory=factory,
+                   calendar_check=lambda _: True)
+    with factory() as db:
+        rows = db.query(PortfolioWorkflowRun).filter_by(step="INTRADAY_REVIEW").all()
+        assert [(r.slot, r.status) for r in rows] == [("10:30", "MISSED")]
+    engine.dispose()
+
+
+def test_parallel_batches_do_not_overlap():
+    engine, factory = _db()
+    invoked = []
+    async def handler(*args):
+        invoked.append(args[0])
+        result = await run_step("INTRADAY_REVIEW", now=datetime(2026, 9, 28, 10, 1, tzinfo=SH),
+                                db_factory=factory, handler=handler, calendar_check=lambda _: True)
+        assert result["reason"] == "BATCH_ALREADY_RUNNING"
+        return {"status": "SUCCEEDED"}
+    asyncio.run(run_step("MORNING_ADJUST", now=datetime(2026, 9, 28, 10, 0, tzinfo=SH),
+                         db_factory=factory, handler=handler, calendar_check=lambda _: True))
+    assert invoked == ["MORNING_ADJUST"]
     engine.dispose()

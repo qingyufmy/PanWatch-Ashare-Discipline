@@ -10,6 +10,7 @@ import {
   loadPortfolioPageQuoteData,
 } from '@/lib/portfolio-page-data'
 import { SuggestionBadge, type SuggestionInfo, type KlineSummary } from '@panwatch/biz-ui/components/suggestion-badge'
+import { PortfolioAdviceBadge, type PortfolioAdvice } from '@/components/PortfolioAdviceBadge'
 import { buildKlineSuggestion } from '@/lib/kline-scorer'
 import { KlineSummaryDialog } from '@panwatch/biz-ui/components/kline-summary-dialog'
 import { Button } from '@panwatch/base-ui/components/ui/button'
@@ -418,6 +419,9 @@ export default function StocksPage() {
   // 建议池建议（来自 /suggestions API）
   const [poolSuggestions, setPoolSuggestions] = useState<Record<string, PoolSuggestion>>({})
   const [poolSuggestionsLoading, setPoolSuggestionsLoading] = useState(false)
+  const [portfolioAdvice, setPortfolioAdvice] = useState<Record<string, PortfolioAdvice>>({})
+  const [portfolioAdviceUnavailable, setPortfolioAdviceUnavailable] = useState(false)
+  const [portfolioMarketStatus, setPortfolioMarketStatus] = useState('TRADING_DAY')
   const [priceAlertSummaryMap, setPriceAlertSummaryMap] = useState<Record<string, { total: number; enabled: number }>>({})
 
   // News Dialog
@@ -613,7 +617,7 @@ export default function StocksPage() {
     if (items.length === 0) return {}
     try {
       const params = new URLSearchParams({
-        include_expired: 'true',
+        include_expired: 'false',
         stock_keys: buildPortfolioStockKeys(items),
       })
       return await fetchAPI<Record<string, PoolSuggestion>>(`/suggestions?${params.toString()}`, { signal })
@@ -695,6 +699,17 @@ export default function StocksPage() {
       setPoolSuggestionsLoading(false)
     }
   }, [buildQuoteItems, requestSuggestions])
+
+  const loadPortfolioAdvice = useCallback(async () => {
+    try {
+      const data = await fetchAPI<{ trade_date: string; market_status: string; items: Record<string, PortfolioAdvice> }>('/portfolio-workflow/advice')
+      setPortfolioAdvice(data.items)
+      setPortfolioMarketStatus(data.market_status)
+      setPortfolioAdviceUnavailable(false)
+    } catch {
+      setPortfolioAdviceUnavailable(true)
+    }
+  }, [])
 
   const loadPriceAlertSummaries = useCallback(async () => {
     const rows = await requestPriceAlerts(buildQuoteItems())
@@ -909,10 +924,11 @@ export default function StocksPage() {
     await Promise.all([
       refreshQuotes(),
       loadPoolSuggestions(),
+      loadPortfolioAdvice(),
       loadPriceAlertSummaries(),
       refreshKlines(),
     ])
-  }, [loadPoolSuggestions, loadPriceAlertSummaries, refreshKlines, refreshQuotes])
+  }, [loadPoolSuggestions, loadPortfolioAdvice, loadPriceAlertSummaries, refreshKlines, refreshQuotes])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -922,6 +938,23 @@ export default function StocksPage() {
       initialLoadPromiseRef.current = null
     }
   }, [loadInitialData])
+
+  // Read-only advice polling; this never triggers a model run or a trade.
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === 'visible') {
+        void loadPortfolioAdvice()
+        void loadPoolSuggestions()
+      }
+    }
+    void loadPortfolioAdvice()
+    const timer = setInterval(refresh, 60_000)
+    document.addEventListener('visibilitychange', refresh)
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', refresh)
+    }
+  }, [loadPortfolioAdvice, loadPoolSuggestions])
 
   useEffect(() => {
     if (agentDialogStock) void loadConfigAsync()
@@ -2069,6 +2102,7 @@ export default function StocksPage() {
                                       {pos.name}
                                     </button>
                                     {(() => {
+                                      if (pos.market === 'CN') return <span className="ml-2"><PortfolioAdviceBadge advice={portfolioAdvice[pos.symbol] || null} stockName={pos.name} symbol={pos.symbol} unavailable={portfolioAdviceUnavailable} marketStatus={portfolioMarketStatus} /></span>
                                       const { suggestion, kline } = getSuggestionForStock(pos.symbol, pos.market, true)
                                       return (suggestion || kline) ? (
                                         <span className="ml-2">
@@ -2079,6 +2113,7 @@ export default function StocksPage() {
                                             kline={kline}
                                             market={pos.market}
                                             hasPosition={true}
+                                            showTechnicalCompanion={false}
                                           />
                                         </span>
                                       ) : null
@@ -2254,6 +2289,7 @@ export default function StocksPage() {
                               </div>
                               {/* Row 2 (Suggestion badge, dedicated row to avoid wrapping mess) */}
                               {(() => {
+                                if (pos.market === 'CN') return <div className="mb-2"><PortfolioAdviceBadge advice={portfolioAdvice[pos.symbol] || null} stockName={pos.name} symbol={pos.symbol} unavailable={portfolioAdviceUnavailable} marketStatus={portfolioMarketStatus} /></div>
                                 const { suggestion, kline } = getSuggestionForStock(pos.symbol, pos.market, true)
                                 return (suggestion || kline) ? (
                                   <div className="mb-2">
@@ -2264,6 +2300,7 @@ export default function StocksPage() {
                                       kline={kline}
                                       market={pos.market}
                                       hasPosition={true}
+                                      showTechnicalCompanion={false}
                                     />
                                   </div>
                                 ) : null
@@ -2495,6 +2532,7 @@ export default function StocksPage() {
                           kline={kline}
                           market={stock.market}
                           hasPosition={false}
+                          showTechnicalCompanion={false}
                         />
                       ) : (
                         <div className="text-[11px] text-muted-foreground/70 py-2">暂无技术面/AI 分析</div>

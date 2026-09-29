@@ -38,7 +38,7 @@ def seed_default_profiles(db: Session) -> int:
     if model is None:
         return 0
     defaults = {
-        "FAST": (2400, 60, 1, "FAST_BACKUP"),
+        "FAST": (10000, 150, 1, "FAST_BACKUP"),
         "DEEP": (6000, 120, 0, "DEEP_BACKUP"),
     }
     created = 0
@@ -131,6 +131,8 @@ async def run_role(
                     request_options["reasoning_effort"] = config["reasoning_effort"]
                 if config["thinking"] in {"enabled", "disabled"}:
                     request_options["thinking"] = config["thinking"]
+                if schema_validator:
+                    request_options["response_format"] = {"type": "json_object"}
                 content = await asyncio.wait_for(
                     client.chat_multi(
                         [{"role": "system", "content": system_prompt},
@@ -141,6 +143,10 @@ async def run_role(
                 )
                 reported = getattr(client, "last_reported_model", None)
                 input_tokens, output_tokens, cost_usd = _usage_numbers(client)
+                if not content.strip():
+                    raise ValueError("model_empty_output")
+                if getattr(client, "last_finish_reason", None) == "length":
+                    raise ValueError("model_output_truncated")
                 schema_valid = schema_validator(content) if schema_validator else None
                 if schema_valid is False:
                     raise ValueError("model_schema_invalid")
@@ -161,6 +167,13 @@ async def run_role(
                 "input_hash": input_hash,
                 "output_hash": logical_hash(content) if content else None,
                 "output_text": content or None,
+                "response_meta": {
+                    "finish_reason": getattr(client, "last_finish_reason", None),
+                    "reasoning_tokens": getattr(client, "last_reasoning_tokens", None),
+                    "content_chars": len(content),
+                    "thinking": config["thinking"], "max_tokens": config["max_tokens"],
+                    "timeout_seconds": config["timeout_seconds"],
+                },
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "cost_usd": cost_usd,
@@ -178,7 +191,8 @@ async def run_role(
                     requested_model=config["model"],
                     reported_model=reported, degraded=degraded,
                 )
-            if isinstance(last_error, ValueError) and str(last_error) == "model_schema_invalid":
+            if isinstance(last_error, ValueError) and str(last_error).startswith((
+                "model_schema_invalid", "model_empty_output", "model_output_truncated")):
                 raise last_error  # Schema errors require review, never silently change model.
         current_role = config["fallback_role"]
     raise last_error or RuntimeError("model_route_unavailable")

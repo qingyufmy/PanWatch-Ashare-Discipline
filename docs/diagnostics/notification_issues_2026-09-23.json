@@ -1,0 +1,20 @@
+{
+  "trade_date": "2026-09-23",
+  "source_revision": "5c82d00",
+  "issues": [
+    {"id": "N01", "status": "CONFIRMED_SOURCE", "severity": "HIGH", "code": "BATCH_EVENT_GATE_IGNORED"},
+    {"id": "N02", "status": "CONFIRMED_SOURCE", "severity": "CRITICAL", "code": "RAW_PROPOSAL_CAN_NOTIFY_AFTER_SAVE_OR_POLICY_FAILURE"},
+    {"id": "N03", "status": "CONFIRMED_SOURCE", "severity": "HIGH", "code": "PROPOSAL_DEDUPE_CAN_HIDE_REVERSAL"},
+    {"id": "N04", "status": "CONFIRMED_SOURCE", "severity": "MEDIUM", "code": "NOTICE_LEVEL_EVIDENCE_MISSING"},
+    {"id": "N05", "status": "CONFIRMED_SOURCE", "severity": "MEDIUM", "code": "INCONSISTENT_WORKFLOW_MESSAGE"},
+    {"id": "N06", "status": "CONFIRMED_SOURCE", "severity": "HIGH", "code": "GROUP_KEY_AND_ATTEMPT_ONLY_DEDUPE"},
+    {"id": "N07", "status": "CONFIRMED_SOURCE", "severity": "MEDIUM", "code": "MULTIPLE_BUSINESS_SENDERS"},
+    {"id": "D01", "status": "CONFIRMED_SOURCE", "severity": "HIGH", "code": "EASTMONEY_LOT_TO_SHARE_MISSING"},
+    {"id": "D02", "status": "CONFIRMED_SOURCE", "severity": "HIGH", "code": "ROW_COUNT_AGGREGATION_SHIFT"},
+    {"id": "D03", "status": "CONFIRMED_SOURCE", "severity": "HIGH", "code": "INSUFFICIENT_WARMUP_RETURNS_MA20"},
+    {"id": "D04", "status": "CONFIRMED_SOURCE", "severity": "HIGH", "code": "CURRENT_BAR_MOVES_SUPPORT"},
+    {"id": "D05", "status": "CONFIRMED_SOURCE", "severity": "MEDIUM", "code": "FEATURES_NOT_LINKED_TO_DECISION"},
+    {"id": "A01", "status": "CONFIRMED_SOURCE", "severity": "MEDIUM", "code": "PER_MESSAGE_AUDIT_ABSENT"},
+    {"id": "SCHEDULE_CLOSE", "status": "CONFIRMED_SOURCE", "severity": "HIGH", "code": "RISK_MONITOR_ENDS_AT_1430"}
+  ]
+}

@@ -24,6 +24,8 @@ class ActionProposal(BaseModel):
     confidence: float = Field(ge=0, le=1)
     rationale: str = Field(min_length=3, max_length=1000)
     evidence_refs: list[str] = Field(min_length=1)
+    decision_basis: Literal["OBSERVATION_PRICE", "MARKET_WEAKNESS", "OTHER", "NO_CHANGE"] | None = None
+    stop_relation: Literal["AT_OR_BELOW", "ABOVE", "UNKNOWN"] | None = None
 
     @field_validator("symbol", mode="before")
     @classmethod
@@ -58,17 +60,77 @@ class PortfolioActionPlan(BaseModel):
 
 PROMPTS = {
     "flash": ("FAST", "Return one JSON PortfolioActionPlan for the supplied holdings. "
-              "Cover each holding exactly once. Use HOLD when evidence is uncertain. "
-              "Keep each rationale under 12 words and use short evidence references. "
+              "Cover each holding exactly once. First assess the source-labelled CN indices, "
+              "candidate-sample breadth, and global technology observations. Describe their "
+              "agreement or disagreement and a bounded whole-portfolio exposure in "
+              "portfolio_rationale. Give each holding a target_weight as a portfolio weight "
+              "when supported by evidence and explain ADD more carefully than HOLD. "
+              "Treat missing timestamps, stale quotes, sample breadth and unverified global "
+              "technology as uncertainty, never as confirmation. Auction and intraday data "
+              "must confirm directional proposals before a paper fill. Use HOLD when evidence "
+              "is insufficient. Do not invent prices, fills, broker cash or sellable quantity. "
               "Never claim an order was placed. No prose outside JSON."),
     "deep": ("DEEP", "Review the portfolio evidence and return one JSON PortfolioActionPlan. "
              "Cover every holding exactly once; cite evidence_refs for each proposal. "
              "Treat stale or missing inputs as HOLD. Never claim execution. No prose outside JSON."),
-    "review": ("FAST", "Review an existing portfolio proposal and evidence. "
-               "Return one JSON PortfolioActionPlan with every holding exactly once. "
-               "Resolve conflicts conservatively as HOLD. Never claim execution. No prose outside JSON."),
+    "review": ("FAST", "Review the frozen whole-portfolio evidence and current index, sector "
+               "and holding quotes. Return one JSON PortfolioActionPlan with every holding "
+               "exactly once. Set target_weight for supported position changes and provide "
+               "explicit qty_hint. ADD requires fresh stock and index confirmation, adequate "
+               "cash and a risk limit; otherwise HOLD. An intraday round trip needs separate "
+               "sell and later buy signals and cannot sell shares bought today. Treat missing "
+               "or timeless evidence as uncertain. Never claim execution. No prose outside JSON."),
 }
-PROMPT_VERSION = "1.0.2"
+PROMPT_VERSION = "1.0.3"
+NOTIFICATION_CANDIDATE_VERSION = "1.1.0-notification-candidate"
+
+
+def seed_notification_candidate_prompts(db: Session) -> int:
+    """Store the stricter contract for replay; never activate it at startup."""
+    created = 0
+    output_schema = {
+        "type": "object", "required": ["trade_date", "proposals"],
+        "properties": {
+            "trade_date": {"type": "string"},
+            "proposals": {"type": "array", "items": {"type": "object", "required": [
+                "market", "symbol", "action", "decision_status", "fact_refs", "invalidation_refs",
+            ], "properties": {
+                "market": {"const": "CN"}, "symbol": {"type": "string"},
+                "action": {"enum": ["ADD", "REDUCE", "HOLD", "EXIT", None]},
+                "decision_status": {"enum": ["PROPOSED", "DATA_UNKNOWN", "MODEL_FAILED"]},
+                "fact_refs": {"type": "array", "items": {"type": "string"}},
+                "invalidation_refs": {"type": "array", "items": {"type": "string"}},
+                "escalate": {"type": "boolean"},
+            }}},
+        },
+    }
+    for prompt_id in ("flash", "deep", "review"):
+        if db.query(PromptVersion).filter_by(prompt_id=prompt_id,
+                                              version=NOTIFICATION_CANDIDATE_VERSION).first():
+            continue
+        role = "DEEP" if prompt_id == "deep" else "FAST"
+        template = (
+            "Use only frozen evidence references supplied in the context. "
+            "Return one JSON proposal per held CN position. Missing data must use action=null "
+            "and decision_status=DATA_UNKNOWN, never HOLD. Do not invent prices, shares, "
+            "executions or broker confirmation. Cite at most three fact_refs. "
+            "A proposed action is not an approved or executed trade."
+        )
+        db.add(PromptVersion(
+            prompt_id=prompt_id, version=NOTIFICATION_CANDIDATE_VERSION,
+            system_template=template,
+            input_schema={"type": "object", "required": ["trade_date", "positions", "feature_snapshot_refs"]},
+            output_schema=output_schema, model_role=role,
+            change_reason="Candidate fact-reference and unknown-state contract; replay before activation",
+            parent_version=PROMPT_VERSION,
+            prompt_hash=prompt_digest(prompt_id, NOTIFICATION_CANDIDATE_VERSION, template,
+                                      {"type": "object", "required": ["trade_date", "positions", "feature_snapshot_refs"]},
+                                      output_schema, role),
+            status="CANDIDATE",
+        ))
+        created += 1
+    db.commit()
+    return created
 
 
 def prompt_digest(prompt_id: str, version: str, system_template: str,
@@ -86,15 +148,13 @@ def seed_prompts(db: Session) -> int:
         if db.query(PromptVersion).filter_by(prompt_id=prompt_id, version=PROMPT_VERSION).first():
             continue
         prior = db.query(PromptVersion).filter_by(prompt_id=prompt_id, status="ACTIVE").order_by(PromptVersion.id.desc()).first()
-        for old in db.query(PromptVersion).filter_by(prompt_id=prompt_id, status="ACTIVE").all():
-            old.status = "ARCHIVED"
         db.add(PromptVersion(
             prompt_id=prompt_id, version=PROMPT_VERSION, system_template=template,
             input_schema=input_schema, output_schema=output_schema,
             model_role=role, change_reason="Compact all-holdings JSON contract",
             parent_version=prior.version if prior else None,
             prompt_hash=prompt_digest(prompt_id, PROMPT_VERSION, template, input_schema, output_schema, role),
-            status="ACTIVE",
+            status="ACTIVE" if prior is None else "CANDIDATE",
         ))
         created += 1
     db.commit()
@@ -147,11 +207,50 @@ async def run_portfolio_prompt(prompt_id: str, payload: dict, *, db_factory=None
         try:
             parse_portfolio_plan(raw, symbols, trade_date)
             return True
-        except Exception:
-            return False
+        except Exception as exc:
+            # Keep field locations/types, never provider content, in the failure ledger.
+            errors = getattr(exc, "errors", lambda: [])()
+            codes = [".".join(map(str, e['loc'])) + ':' + e['type'] for e in errors[:4]]
+            raise ValueError("model_schema_invalid:" + (";".join(codes) or str(exc)[:80])) from exc
 
     result = await run_role(role, system, content, prompt_id=pid,
                             prompt_version=version, prompt_hash=digest,
                             schema_validator=validate, db_factory=factory,
                             client_factory=client_factory or AIClient)
     return parse_portfolio_plan(result.content, symbols, trade_date), result
+
+
+FACT_PROMPT_ID = "intraday_review"
+FACT_PROMPT_VERSION = "1.0.4-declared-facts"
+
+
+def seed_fact_prompt(db: Session) -> PromptVersion:
+    """Immutable candidate; deployment activates only after regression validation."""
+    row = db.query(PromptVersion).filter_by(prompt_id=FACT_PROMPT_ID, version=FACT_PROMPT_VERSION).first()
+    if row:
+        return row
+    template = PROMPTS["review"][1] + (
+        " Advice is exclusively for USER_DECLARED positions; paper account holdings and cash "
+        "are not inputs. For EACH proposal copy stop_relation from decision_facts exactly "
+        "and provide decision_basis: OBSERVATION_PRICE only when AT_OR_BELOW, "
+        "MARKET_WEAKNESS for source-backed market reductions, OTHER or NO_CHANGE. "
+        "Compare the supplied current price and observation price numerically; ABOVE never "
+        "means below or breached. AT_OR_BELOW forbids HOLD/ADD/OPEN. UNKNOWN means no "
+        "price assertion. Explain in concise Simplified Chinese. Respect declared_sell_constraints. "
+        "When declared cash is unverified, an ADD can only be a conditional proposal with "
+        "explicit target weight and fresh market support; state cash needs user confirmation. "
+        "Never use absence of paper positions as advice.")
+    input_schema = {"type": "object", "required": ["trade_date", "positions", "evidence"]}
+    output_schema = PortfolioActionPlan.model_json_schema()
+    item = output_schema["$defs"]["ActionProposal"]
+    item["required"] += ["decision_basis", "stop_relation"]
+    for field in ("decision_basis", "stop_relation"):
+        item["properties"][field] = item["properties"][field]["anyOf"][0]
+    row = PromptVersion(prompt_id=FACT_PROMPT_ID, version=FACT_PROMPT_VERSION, system_template=template,
+        input_schema=input_schema, output_schema=output_schema, model_role="FAST",
+        change_reason="Declared-only account scope and deterministic observation-price facts",
+        parent_version=PROMPT_VERSION, status="CANDIDATE",
+        prompt_hash=prompt_digest(FACT_PROMPT_ID, FACT_PROMPT_VERSION, template, input_schema, output_schema, "FAST"))
+    db.add(row)
+    db.commit()
+    return row

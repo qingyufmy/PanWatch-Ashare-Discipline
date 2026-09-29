@@ -73,11 +73,18 @@ def test_法定节假日不是交易日(loaded_calendar):
     assert tc.is_trading_day(MarketCode.CN, date(2026, 10, 9)) is True  # 节后首个交易日
 
 
+def test_已证实交易日不把日历缺失当开市(loaded_calendar):
+    assert tc.confirmed_cn_trading_day(date(2026, 9, 25)) is False
+    assert tc.confirmed_cn_trading_day(date(2026, 9, 28)) is True
+    assert tc.confirmed_cn_trading_day(date(2027, 1, 1)) is None
+
+
 def test_日历缺失时降级为只判周末():
     """拿不到日历时工作日一律视为交易日 —— 宁可多跑,不可漏发一整天。"""
     assert tc._CN_TRADING_DATES is None
     assert tc.is_trading_day(MarketCode.CN, date(2026, 10, 1)) is True  # 降级:识别不出国庆
     assert tc.is_trading_day(MarketCode.CN, date(2026, 8, 8)) is False  # 但周末照样拦住
+    assert tc.confirmed_cn_trading_day(date(2026, 9, 25)) is None
 
 
 def test_超出日历覆盖范围时降级为只判周末(loaded_calendar):
@@ -212,6 +219,7 @@ def test_交易日照常发盘前计划和日终摘要(monkeypatch, loaded_calen
     from src.modules.paper_trading.paper_trading_scheduler import PaperTradingScheduler
 
     calls = _patch_notifiers(monkeypatch)
+    monkeypatch.setattr("src.modules.paper_trading.portfolio_paper.paper_mode", lambda _db: False)
     monday = datetime(2026, 8, 10, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     monkeypatch.setattr(tc, "_now_in_market_tz", lambda code: monday)
 

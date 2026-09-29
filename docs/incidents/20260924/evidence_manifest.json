@@ -1,0 +1,30 @@
+{
+  "trade_date": "2026-09-24",
+  "scope": "PRIVATE_FROZEN_DB_PUBLIC_HASHES_ONLY",
+  "source_revision": "ac48c4d9d4dabe449ffae09d9424c5525567de8a",
+  "schema_version": 140,
+  "database_snapshot": {
+    "path": "data/incidents/20260924/panwatch-20260924-frozen.db",
+    "bytes": 88064000,
+    "sha256": "2c150ec2e784a25c6fcee0e86fb9360b596cce2e1add83fa995e4b30df538f20"
+  },
+  "private_outputs": {
+    "execution_funnel.json": {"lines": 67, "sha256": "3b1a50fbbea990614ff68c7bfc0266bbcfb90ed97fbd9fee0177144659df8432"},
+    "notification_missing_attribution.json": {"lines": 20, "sha256": "96244e4333b7764b919bd2fde974111b1995009c76900d4778097a91e78eff7c"},
+    "provenance_validation.json": {"lines": 9, "sha256": "35174d23197f33dc949f2ac60ba13ccb45a84ded3987143d8be3962414667945"},
+    "risk_episode_review.csv": {"records": 34, "sha256": "bc6d7f2ef4a570ea74f8a73145e9942cdd9c960e7a4896b19614b2f8ca5986fc"},
+    "signal_attribution.csv": {"records": 364, "sha256": "1533d5c208aad2e02c3dc6429b093477c415420ceef1317e1f056b35c472136f"},
+    "timeline_audit.csv": {"records": 30, "sha256": "32f0b9bd80568ce87070a15f2ca009d37f07ab141296e5f146cee1db89694c41"}
+  },
+  "dependency_hashes": {
+    "requirements.txt": "ea2a175dd81e5f40639fe339e52395752510a8cc14a273abdd30c64695cf7667",
+    "pyproject.toml": "b6f8a525b4af500f045bd42557fafe65a6fc8ac0c3a7c3d8eed12068f0f7d424",
+    "frontend/pnpm-lock.yaml": "ffa23a1ba2796664e7eb78d8672d47ca4a2ade65b3fa6a6c078024ab532c18ed"
+  },
+  "utc_coverage": {
+    "workflow_started_min": "2026-09-23 22:50:00.011014",
+    "workflow_finished_max": "2026-09-24 07:30:41.045279",
+    "signal_generated_min": "2026-09-24 01:02:15.986017",
+    "signal_generated_max": "2026-09-24 07:49:36.344636"
+  }
+}

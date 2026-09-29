@@ -1,9 +1,9 @@
 """建议池管理 - 汇总各 Agent 建议"""
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
-from datetime import timezone
 from sqlalchemy import and_, func, or_
 
 from src.platform.persistence.database import SessionLocal
@@ -14,18 +14,18 @@ from src.platform.persistence.json_safe import to_jsonable
 logger = logging.getLogger(__name__)
 
 
-def _norm_text(s: str) -> str:
-    return " ".join((s or "").strip().split())
+@dataclass(frozen=True)
+class SuggestionWriteResult:
+    persisted: bool
+    suggestion_id: int | None = None
+    signal_id: str | None = None
+    decision_status: str | None = None
+    approved_qty: int | None = None
+    notification_id: str | None = None
+    reason: str | None = None
 
-
-def _dedupe_window_minutes(agent_name: str) -> int:
-    # Default: keep the suggestion list stable and avoid repeated rows.
-    # Intraday runs frequently; other agents run a few times a day.
-    if agent_name == "intraday_monitor":
-        return 30
-    if agent_name == "news_digest":
-        return 60
-    return 180
+    def __bool__(self) -> bool:
+        return self.persisted
 
 
 # Agent 有效期配置（小时）
@@ -50,17 +50,17 @@ def _journal_action(raw_action: str, meta: dict | None = None) -> str:
     rating = str((meta or {}).get("rating_raw") or "").strip().lower()
     rating_action = {
         "buy": "OPEN", "overweight": "ADD", "hold": "HOLD",
-        "underweight": "REDUCE", "sell": "EXIT", "review": "HOLD",
+        "underweight": "REDUCE", "sell": "EXIT", "review": "REVIEW",
     }
     if rating in rating_action:
         return rating_action[rating]
     return {
         "buy": "OPEN", "add": "ADD", "hold": "HOLD",
-        "watch": "HOLD", "alert": "HOLD", "avoid": "HOLD",
+        "watch": "REVIEW", "alert": "REVIEW", "avoid": "REVIEW",
         "reduce": "REDUCE", "sell": "EXIT",
-    }.get((raw_action or "").strip().lower(), "HOLD")
+    }.get((raw_action or "").strip().lower(), "REVIEW")
 
-def save_suggestion(
+def save_suggestion_result(
     stock_symbol: str,
     stock_name: str,
     action: str,
@@ -74,7 +74,8 @@ def save_suggestion(
     ai_response: str = "",
     stock_market: str = "CN",
     meta: dict | None = None,
-) -> bool:
+    queue_notification: bool = True,
+) -> SuggestionWriteResult:
     """
     保存 Agent 建议到建议池
 
@@ -92,7 +93,7 @@ def save_suggestion(
         ai_response: AI 原始响应
 
     Returns:
-        是否保存成功
+        持久化结果、Signal 与 Policy 裁决
     """
     db = SessionLocal()
     try:
@@ -109,79 +110,8 @@ def save_suggestion(
         if not agent_label:
             agent_label = AGENT_LABELS.get(agent_name, agent_name)
 
-        # Dedupe: if the latest suggestion from the same agent is essentially the same,
-        # do not create a new row. This prevents "AI 建议反复" in the UI.
-        try:
-            latest = (
-                db.query(StockSuggestion)
-                .filter(
-                    StockSuggestion.stock_symbol == stock_symbol,
-                    StockSuggestion.stock_market == market,
-                    StockSuggestion.agent_name == agent_name,
-                )
-                .order_by(StockSuggestion.created_at.desc(), StockSuggestion.id.desc())
-                .first()
-            )
-
-            if latest and latest.created_at:
-                latest_created = latest.created_at
-                if latest_created.tzinfo is None:
-                    latest_created = latest_created.replace(tzinfo=timezone.utc)
-
-                window = timedelta(minutes=_dedupe_window_minutes(agent_name))
-                same_key = (
-                    _norm_text(latest.action) == _norm_text(action)
-                    and _norm_text(latest.action_label) == _norm_text(action_label)
-                    and _norm_text(latest.signal or "") == _norm_text(signal)
-                )
-
-                if same_key and (now - latest_created) <= window:
-                    # Extend expiry (keep the first message to avoid churn).
-                    if not latest.expires_at or latest.expires_at < expires_at:
-                        latest.expires_at = expires_at
-                    if not (latest.stock_name or "") and stock_name:
-                        latest.stock_name = stock_name
-                    db.commit()
-                    logger.info(
-                        f"建议去重: {stock_symbol} {action_label} (来源: {agent_label})"
-                    )
-                    return True
-
-                # Stability: avoid flip-flopping to a less severe action within a short window.
-                try:
-                    action_rank = {
-                        "alert": 4,
-                        "avoid": 4,
-                        "sell": 4,
-                        "reduce": 3,
-                        "buy": 2,
-                        "add": 2,
-                        "hold": 1,
-                        "watch": 0,
-                    }
-                    old_r = action_rank.get((latest.action or "").strip(), 0)
-                    new_r = action_rank.get((action or "").strip(), 0)
-                    change_window = timedelta(
-                        minutes=_dedupe_window_minutes(agent_name)
-                    )
-                    if (now - latest_created) <= change_window and new_r < old_r:
-                        # Keep the previous (more severe) action; extend expiry.
-                        if not latest.expires_at or latest.expires_at < expires_at:
-                            latest.expires_at = expires_at
-                        if not (latest.stock_name or "") and stock_name:
-                            latest.stock_name = stock_name
-                        db.commit()
-                        logger.info(
-                            f"建议稳定: {stock_symbol} 新建议降级({action_label})，保持上一条({latest.action_label})"
-                        )
-                        return True
-                except Exception:
-                    db.rollback()
-        except Exception:
-            # Best-effort only; never block saving.
-            db.rollback()
-
-        # 创建新建议
+        # Every proposal is append-only. Notification dedupe belongs to the
+        # decision/outbox layer; it must never hide a recovery or reversal.
         suggestion = StockSuggestion(
             stock_symbol=stock_symbol,
             stock_market=market,
@@ -205,7 +135,10 @@ def save_suggestion(
         from src.modules.portfolio.signal_journal import record_signal
 
         journal_signal, _ = record_signal(
-            db, market=market, symbol=stock_symbol,
+            db, market=market,
+            symbol=stock_symbol[2:] if market == "CN" and len(stock_symbol) == 8
+                   and stock_symbol[:2].lower() in {"sh", "sz", "bj"} and stock_symbol[2:].isdigit()
+                   else stock_symbol,
             action=_journal_action(action, meta), raw_action=action,
             source="AGENT", source_agent=agent_name,
             source_suggestion_id=suggestion.id,
@@ -220,18 +153,31 @@ def save_suggestion(
         )
         from src.modules.portfolio.policy_gate import evaluate_signal
 
-        evaluate_signal(db, journal_signal.signal_id, commit=False)
+        evaluated = evaluate_signal(db, journal_signal.signal_id, commit=False)
+        from src.platform.persistence.models import ActionableSignal
+        from src.modules.portfolio.decision_router import record_position_decision
+
+        approved = db.get(ActionableSignal, journal_signal.signal_id)
+        _decision, notification = record_position_decision(db, evaluated,
+                                                           queue_notification=queue_notification)
         db.commit()
 
         logger.info(f"保存建议: {stock_symbol} {action_label} (来源: {agent_label})")
-        return True
+        return SuggestionWriteResult(True, suggestion.id, journal_signal.signal_id,
+                                     evaluated.status, approved.approved_qty if approved else None,
+                                     notification.id if notification else None)
 
     except Exception as e:
         logger.error(f"保存建议失败: {e}")
         db.rollback()
-        return False
+        return SuggestionWriteResult(False, reason=type(e).__name__)
     finally:
         db.close()
+
+
+def save_suggestion(**kwargs) -> bool:
+    """Compatibility entry point for callers that only need persistence status."""
+    return bool(save_suggestion_result(queue_notification=False, **kwargs))
 
 
 def get_suggestions_for_stock(
